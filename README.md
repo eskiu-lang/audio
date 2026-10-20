@@ -60,6 +60,17 @@ it a fifth higher. A voice can change while it plays (`set_volume`,
 `set_pan`, `set_pitch`) and stop (`stop`, `stop_all`). [`examples/play.esk`](examples/play.esk)
 plays a WAV file or, given none, a chord it makes on the spot.
 
+## Platforms
+
+| Modules | macOS, Linux, Windows | iOS, Android, WebAssembly |
+|---|---|---|
+| `<audio/wav>`, `<audio/mixer>` | yes | yes |
+| `<audio/device>` (and `<audio>`, which imports it) | yes | not yet |
+
+`<audio/wav>` and `<audio/mixer>` are plain Eskiu and work on every target. Building
+`<audio/device>` for a phone or for WebAssembly stops with an `#error`: SDL3 runs there, but
+it is not checked yet.
+
 ## Install
 
 The output module needs SDL3 (`brew install sdl3` on macOS, the SDL3 development package of
