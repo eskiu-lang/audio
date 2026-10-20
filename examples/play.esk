@@ -1,0 +1,43 @@
+// Plays a WAV file, or a chord made on the spot when no file is given:
+//     eskiuc run -L/opt/homebrew/lib examples/play.esk [sound.wav]
+import <io>;
+import <mem>;
+import <time>;
+import <libc>;
+import <audio>;
+
+Sound chord() {
+    Sound s = sound_new(96000, 1, 48000);
+    double[3] freqs = {261.63, 329.63, 392.0};
+    for (i in 0..96000) {
+        double t = (double)i / 48000.0;
+        double v = 0.0;
+        for (k in 0..3) v += sin(6.283185307179586 * freqs[k] * t);
+        double fade = t < 1.8 ? 1.0 : (2.0 - t) / 0.2;
+        s.data[i] = (float)(v / 3.0 * 0.4 * fade);
+    }
+    return s;
+}
+
+Result<int, string> run(string path) {
+    Sound sound;
+    if (path != null) sound = wav_load(path)?;
+    else sound = chord();
+    defer sound.free();
+    AudioDevice out = audio_open(48000)?;
+    defer out.close();
+    Mixer m = mixer_new(out.rate);
+    defer m.free();
+    uint32 id = m.play(&sound, AudioPlay{});
+    printf("playing %llu frames at %d Hz, %d channel(s)\n", sound.frames, sound.rate, sound.channels);
+    while (m.playing(id)) {
+        out.pump(&m, 50)?;
+        time_sleep_ms(10);
+    }
+    int64 until = time_monotonic_ms() + (int64)out.queued() * 1000 / (int64)out.rate + 100;
+    while (out.queued() > 0 && time_monotonic_ms() < until) time_sleep_ms(10);
+    return Ok<int, string>(0);
+}
+
+Result<int, string> r = run(argc > 1 ? argv[1] : null);
+if (!r.ok) printf("error: %s\n", r.error);

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  SDL_VERSION: 3.4.18
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Eskiu and build SDL3
+        run: |
+          curl -fsSL https://eskiu-lang.org/install.sh | ESKIU_PREFIX=$HOME/.eskiu sh
+          echo "$HOME/.eskiu/bin" >> $GITHUB_PATH
+          curl -fsSL -o sdl.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz
+          tar -xzf sdl.tar.gz
+          cmake -S SDL3-$SDL_VERSION -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX=$HOME/sdl3 > /dev/null
+          cmake --build sdl-build -j4 > /dev/null
+          cmake --install sdl-build > /dev/null
+          echo "LD_LIBRARY_PATH=$HOME/sdl3/lib" >> $GITHUB_ENV
+      - name: Tests
+        run: eskiuc test -L$HOME/sdl3/lib
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Eskiu and SDL3
+        run: brew install eskiu-lang/eskiu/eskiu sdl3
+      - name: Tests
+        run: eskiuc test -L$(brew --prefix)/lib
+      - name: Example builds
+        run: |
+          mkdir -p build
+          eskiuc -L$(brew --prefix)/lib examples/play.esk -o build/play
+          SDL_AUDIO_DRIVER=dummy build/play tests/data/s16.wav
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-sdl3 unzip
+      - name: Install Eskiu
+        run: |
+          curl -fsSL -o eskiu.zip https://github.com/eskiu-lang/eskiu/releases/latest/download/eskiuc-windows-x86_64.zip
+          unzip -q eskiu.zip -d $HOME/eskiu
+      - name: Tests
+        run: |
+          export PATH="$HOME/eskiu/bin:$PATH"
+          CC=gcc eskiuc test -L/mingw64/lib
