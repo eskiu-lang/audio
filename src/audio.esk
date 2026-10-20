@@ -1,0 +1,8 @@
+// audio.esk: sound for Eskiu: WAV files, a mixer and output through SDL3.
+//
+// <audio/wav> and <audio/mixer> are pure Eskiu; <audio/device> (and so this
+// module) links SDL3.
+
+import <audio/wav>;
+import <audio/mixer>;
+import <audio/device>;
