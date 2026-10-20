@@ -18,7 +18,7 @@ jobs:
           echo "$HOME/.eskiu/bin" >> $GITHUB_PATH
           curl -fsSL -o sdl.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz
           tar -xzf sdl.tar.gz
-          cmake -S SDL3-$SDL_VERSION -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+          cmake -S SDL3-$SDL_VERSION -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_UNIX_CONSOLE_BUILD=ON \
             -DCMAKE_INSTALL_PREFIX=$HOME/sdl3 > /dev/null
           cmake --build sdl-build -j4 > /dev/null
           cmake --install sdl-build > /dev/null
