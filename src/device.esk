@@ -14,6 +14,10 @@ import <mem>;
 import <result>;
 import <audio/mixer>;
 
+#if defined(__wasm__) || defined(__ANDROID__) || defined(TARGET_OS_IPHONE)
+#error "audio: <audio/device> runs on macOS, Linux and Windows for now; <audio/wav> and <audio/mixer> work everywhere"
+#endif
+
 #pragma link("SDL3")
 
 struct _SdlSpec {
