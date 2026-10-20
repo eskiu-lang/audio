@@ -1,0 +1,324 @@
+// wav.esk: WAV files to and from float samples.
+//
+// Decoding reads RIFF WAVE (and WAVE_FORMAT_EXTENSIBLE) with 8, 16, 24 and
+// 32-bit integer PCM, 32 and 64-bit float, IMA ADPCM and Microsoft ADPCM.
+// Every format becomes interleaved float samples between -1 and 1:
+//
+//     Sound s = wav_load("jump.wav")?;
+//     defer s.free();
+//     printf("%llu frames, %d channels at %d Hz\n", s.frames, s.channels, s.rate);
+//
+// wav_save writes 16-bit PCM or 32-bit float.
+
+import <mem>;
+import <string>;
+import <result>;
+import <fs>;
+
+// frames samples per channel, interleaved: data holds frames * channels
+// floats.
+struct Sound {
+    *float data;
+    uint64 frames;
+    int channels;
+    int rate;
+}
+
+String _wav_err;
+
+string _wav_fail(string what) {
+    String_clear(&_wav_err);
+    String_append(&_wav_err, "wav: ");
+    String_append(&_wav_err, what);
+    return _wav_err.data;
+}
+
+uint32 _wav_u32(*uint8 p) {
+    return (uint32)p[0] | (uint32)p[1] << 8 | (uint32)p[2] << 16 | (uint32)p[3] << 24;
+}
+
+uint32 _wav_u16(*uint8 p) {
+    return (uint32)p[0] | (uint32)p[1] << 8;
+}
+
+int _wav_s16(*uint8 p) {
+    return (int)(int16)_wav_u16(p);
+}
+
+void Sound_free(*Sound self) {
+    if (self.data != null) free(self.data);
+    self.data = null;
+}
+
+// A sound of frames silent frames.
+Sound sound_new(uint64 frames, int channels, int rate) {
+    return Sound{alloc<float>((int64)(frames * (uint64)channels) + 1), frames, channels, rate};
+}
+
+int[89] _IMA_STEP = {7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97,
+    107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484,
+    7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767};
+int[16] _IMA_INDEX = {-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8};
+
+int _ima_step(int nibble, *int pred, *int index) {
+    int step = _IMA_STEP[*index];
+    int diff = step >> 3;
+    if ((nibble & 1) != 0) diff += step >> 2;
+    if ((nibble & 2) != 0) diff += step >> 1;
+    if ((nibble & 4) != 0) diff += step;
+    if ((nibble & 8) != 0) *pred = *pred - diff;
+    else *pred = *pred + diff;
+    if (*pred > 32767) *pred = 32767;
+    if (*pred < -32768) *pred = -32768;
+    *index = *index + _IMA_INDEX[nibble];
+    if (*index < 0) *index = 0;
+    if (*index > 88) *index = 88;
+    return *pred;
+}
+
+// IMA ADPCM: each block starts with a 4-byte header per channel (predictor,
+// step index), then groups of 4 bytes (8 nibbles) per channel in turn.
+string _wav_ima(*uint8 d, uint64 len, int channels, uint32 align, Sound* s) {
+    if (align < (uint32)(4 * channels) || channels > 8) return "bad IMA ADPCM block size";
+    uint64 per_block = (uint64)(align - (uint32)(4 * channels)) * 2 / (uint64)channels + 1;
+    uint64 blocks = (len + align - 1) / align;
+    *s = sound_new(blocks * per_block, channels, s.rate);
+    uint64 frame = 0;
+    for (b in 0..blocks) {
+        *uint8 blk = d + b * align;
+        uint64 blen = len - b * align < (uint64)align ? len - b * align : (uint64)align;
+        if (blen < (uint64)(4 * channels)) break;
+        int[8] pred;
+        int[8] index;
+        for (c in 0..channels) {
+            pred[c] = _wav_s16(blk + c * 4);
+            index[c] = (int)blk[c * 4 + 2];
+            if (index[c] > 88) index[c] = 88;
+            s.data[frame * (uint64)channels + (uint64)c] = (float)pred[c] / 32768.0;
+        }
+        uint64 got = 1;
+        uint64 at = (uint64)(4 * channels);
+        while (at + (uint64)(4 * channels) <= blen) {
+            for (c in 0..channels) {
+                *uint8 g = blk + at + (uint64)(c * 4);
+                for (k in 0..8) {
+                    int nib = (int)((g[k / 2] >> ((k % 2) * 4)) & 15);
+                    int v = _ima_step(nib, &pred[c], &index[c]);
+                    uint64 f = frame + got + (uint64)k;
+                    if (f < s.frames) s.data[f * (uint64)channels + (uint64)c] = (float)v / 32768.0;
+                }
+            }
+            got += 8;
+            at += (uint64)(4 * channels);
+        }
+        frame += got;
+    }
+    if (frame < s.frames) s.frames = frame;
+    return null;
+}
+
+int[16] _MS_ADAPT = {230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230};
+
+// Microsoft ADPCM with the seven standard coefficient pairs (or the file's
+// own, from the format chunk).
+string _wav_msadpcm(*uint8 d, uint64 len, int channels, uint32 align, *int coef1, *int coef2, int ncoef, Sound* s) {
+    if (align < (uint32)(7 * channels) || channels > 2) return "bad Microsoft ADPCM block size";
+    uint64 per_block = (uint64)(align - (uint32)(7 * channels)) * 2 / (uint64)channels + 2;
+    uint64 blocks = (len + align - 1) / align;
+    *s = sound_new(blocks * per_block, channels, s.rate);
+    uint64 frame = 0;
+    for (b in 0..blocks) {
+        *uint8 blk = d + b * align;
+        uint64 blen = len - b * align < (uint64)align ? len - b * align : (uint64)align;
+        if (blen < (uint64)(7 * channels)) break;
+        int[2] pred;
+        int[2] delta;
+        int[2] s1;
+        int[2] s2;
+        int at = 0;
+        for (c in 0..channels) {
+            pred[c] = (int)blk[at];
+            if (pred[c] >= ncoef) return "bad Microsoft ADPCM predictor";
+            at++;
+        }
+        for (c in 0..channels) {
+            delta[c] = _wav_s16(blk + at);
+            at += 2;
+        }
+        for (c in 0..channels) {
+            s1[c] = _wav_s16(blk + at);
+            at += 2;
+        }
+        for (c in 0..channels) {
+            s2[c] = _wav_s16(blk + at);
+            at += 2;
+        }
+        for (c in 0..channels) {
+            s.data[frame * (uint64)channels + (uint64)c] = (float)s2[c] / 32768.0;
+            s.data[(frame + 1) * (uint64)channels + (uint64)c] = (float)s1[c] / 32768.0;
+        }
+        uint64 f = frame + 2;
+        int ch = 0;
+        for (i in (uint64)at..blen) {
+            for (h in 0..2) {
+                int nib = h == 0 ? (int)(blk[i] >> 4) : (int)(blk[i] & 15);
+                int sn = nib >= 8 ? nib - 16 : nib;
+                int p = (s1[ch] * coef1[pred[ch]] + s2[ch] * coef2[pred[ch]]) / 256 + sn * delta[ch];
+                if (p > 32767) p = 32767;
+                if (p < -32768) p = -32768;
+                s2[ch] = s1[ch];
+                s1[ch] = p;
+                delta[ch] = (_MS_ADAPT[nib] * delta[ch]) / 256;
+                if (delta[ch] < 16) delta[ch] = 16;
+                if (f < s.frames) s.data[f * (uint64)channels + (uint64)ch] = (float)p / 32768.0;
+                ch++;
+                if (ch == channels) {
+                    ch = 0;
+                    f++;
+                }
+            }
+        }
+        frame = f;
+    }
+    if (frame < s.frames) s.frames = frame;
+    return null;
+}
+
+Result<Sound, string> wav_load(string path) {
+    int64 n = 0;
+    *uint8 d = fs_read_all(path, &n);
+    if (d == null) return Err<Sound, string>(_wav_fail("cannot read the file"));
+    defer free(d);
+    return wav_decode(d, (uint64)n);
+}
+
+Result<Sound, string> wav_decode(*uint8 d, uint64 len) {
+    if (len < 12 || _wav_u32(d) != 0x46464952 || _wav_u32(d + 8) != 0x45564157) return Err<Sound, string>(_wav_fail("not a WAVE file"));
+    uint64 at = 12;
+    *uint8 fmt = null;
+    uint64 fmt_len = 0;
+    *uint8 data = null;
+    uint64 data_len = 0;
+    while (at + 8 <= len) {
+        uint32 id = _wav_u32(d + at);
+        uint64 size = (uint64)_wav_u32(d + at + 4);
+        uint64 body = at + 8;
+        uint64 avail = len - body;
+        if (id == 0x20746D66) {
+            if (size > avail) return Err<Sound, string>(_wav_fail("the format chunk is truncated"));
+            fmt = d + body;
+            fmt_len = size;
+        } else if (id == 0x61746164) {
+            data = d + body;
+            data_len = size < avail ? size : avail;
+        }
+        if (size > avail) break;
+        at = body + size + (size & 1);
+    }
+    if (fmt == null || fmt_len < 16) return Err<Sound, string>(_wav_fail("no format chunk"));
+    if (data == null) return Err<Sound, string>(_wav_fail("no data chunk"));
+    uint32 tag = _wav_u16(fmt);
+    int channels = (int)_wav_u16(fmt + 2);
+    int rate = (int)_wav_u32(fmt + 4);
+    uint32 align = _wav_u16(fmt + 12);
+    int bits = (int)_wav_u16(fmt + 14);
+    if (tag == 0xFFFE && fmt_len >= 40) tag = _wav_u16(fmt + 24);
+    if (channels < 1 || channels > 16 || rate <= 0) return Err<Sound, string>(_wav_fail("bad channel count or rate"));
+    Sound s = Sound{null, 0, channels, rate};
+    if (tag == 0x11) {
+        string err = _wav_ima(data, data_len, channels, align, &s);
+        if (err != null) return Err<Sound, string>(_wav_fail(err));
+        return Ok<Sound, string>(s);
+    }
+    if (tag == 2) {
+        int[32] c1 = {256, 512, 0, 192, 240, 460, 392};
+        int[32] c2 = {0, -256, 0, 64, 0, -208, -232};
+        int ncoef = 7;
+        if (fmt_len >= 22) {
+            int nc = (int)_wav_u16(fmt + 20);
+            if (nc > 0 && nc <= 32 && (uint64)(22 + nc * 4) <= fmt_len) {
+                ncoef = nc;
+                for (k in 0..nc) {
+                    c1[k] = _wav_s16(fmt + 22 + k * 4);
+                    c2[k] = _wav_s16(fmt + 24 + k * 4);
+                }
+            }
+        }
+        string err = _wav_msadpcm(data, data_len, channels, align, &c1[0], &c2[0], ncoef, &s);
+        if (err != null) return Err<Sound, string>(_wav_fail(err));
+        return Ok<Sound, string>(s);
+    }
+    bool is_float = tag == 3;
+    if (!(tag == 1 || is_float)) return Err<Sound, string>(_wav_fail("unsupported encoding"));
+    int bytes = bits / 8;
+    if (bits % 8 != 0 || bytes < 1 || bytes > 8 || (is_float && bytes != 4 && bytes != 8) || (!is_float && bytes > 4)) {
+        return Err<Sound, string>(_wav_fail("unsupported sample size"));
+    }
+    uint64 frame_bytes = (uint64)(bytes * channels);
+    s = sound_new(data_len / frame_bytes, channels, rate);
+    uint64 count = s.frames * (uint64)channels;
+    for (i in 0..count) {
+        *uint8 p = data + i * (uint64)bytes;
+        float v = 0.0;
+        if (is_float && bytes == 4) memcpy(&v, p, 4);
+        else if (is_float) {
+            double x = 0.0;
+            memcpy(&x, p, 8);
+            v = (float)x;
+        } else if (bytes == 1) v = (float)((int)p[0] - 128) / 128.0;
+        else if (bytes == 2) v = (float)_wav_s16(p) / 32768.0;
+        else if (bytes == 3) v = (float)((int)(((uint32)p[0] << 8 | (uint32)p[1] << 16 | (uint32)p[2] << 24)) >> 8) / 8388608.0;
+        else v = (float)((double)(int)_wav_u32(p) / 2147483648.0);
+        s.data[i] = v;
+    }
+    return Ok<Sound, string>(s);
+}
+
+void _wav_put16(*uint8 p, uint32 v) {
+    p[0] = (uint8)(v & 255);
+    p[1] = (uint8)((v >> 8) & 255);
+}
+
+void _wav_put32(*uint8 p, uint32 v) {
+    for (k in 0..4) p[k] = (uint8)((v >> (k * 8)) & 255);
+}
+
+// Writes the sound as a WAV file of 16-bit PCM (bits 16) or 32-bit float
+// (bits 32).
+Result<int, string> wav_save(string path, *Sound s, int bits) {
+    if (bits != 16 && bits != 32) return Err<int, string>(_wav_fail("bits must be 16 or 32"));
+    uint64 count = s.frames * (uint64)s.channels;
+    uint64 data_bytes = count * (uint64)(bits / 8);
+    if (data_bytes > 0xFFFFFFF0) return Err<int, string>(_wav_fail("the sound is too long for a WAV file"));
+    *uint8 out = alloc<uint8>((int64)(44 + data_bytes));
+    defer free(out);
+    memcpy(out, "RIFF", 4);
+    _wav_put32(out + 4, (uint32)(36 + data_bytes));
+    memcpy(out + 8, "WAVEfmt ", 8);
+    _wav_put32(out + 16, 16);
+    _wav_put16(out + 20, bits == 32 ? (uint32)3 : (uint32)1);
+    _wav_put16(out + 22, (uint32)s.channels);
+    _wav_put32(out + 24, (uint32)s.rate);
+    _wav_put32(out + 28, (uint32)(s.rate * s.channels * bits / 8));
+    _wav_put16(out + 32, (uint32)(s.channels * bits / 8));
+    _wav_put16(out + 34, (uint32)bits);
+    memcpy(out + 36, "data", 4);
+    _wav_put32(out + 40, (uint32)data_bytes);
+    for (i in 0..count) {
+        float v = s.data[i];
+        if (bits == 32) memcpy(out + 44 + i * 4, &v, 4);
+        else {
+            if (v > 1.0) v = 1.0;
+            if (v < -1.0) v = -1.0;
+            float scaled = v * 32767.0;
+            int q = (int)(scaled < 0.0 ? scaled - 0.5 : scaled + 0.5);
+            _wav_put16(out + 44 + i * 2, (uint32)q & 0xFFFF);
+        }
+    }
+    *void f = fs_open(path, "wb");
+    if (f == null) return Err<int, string>(_wav_fail("cannot write the file"));
+    fs_write(f, out, (int64)(44 + data_bytes));
+    fs_close(f);
+    return Ok<int, string>(0);
+}
