@@ -1,0 +1,84 @@
+// The mixer: resampling and pitch, equal-power pan, volume, looping, stopping
+// and voices that end.
+import <io>;
+import <mem>;
+import <libc>;
+import <audio/wav>;
+import <audio/mixer>;
+
+int fails = 0;
+
+void check(string what, bool ok) {
+    if (!ok) {
+        printf("FAIL %s\n", what);
+        fails++;
+    }
+}
+
+bool near(float a, float b, float tol) {
+    return fabsf(a - b) <= tol;
+}
+
+// Zero crossings (upward) in n stereo frames of the left channel.
+int crossings(*float out, int n) {
+    int c = 0;
+    for (i in 1..n) {
+        if (out[(i - 1) * 2] < 0.0 && out[i * 2] >= 0.0) c++;
+    }
+    return c;
+}
+
+int main() {
+    Sound tone = sound_new(24000, 1, 24000);
+    for (i in 0..24000) tone.data[i] = (float)sin(6.283185307179586 * 100.0 * (double)i / 24000.0) * 0.5;
+    Sound dc = sound_new(100, 2, 48000);
+    for (i in 0..100) {
+        dc.data[i * 2] = 0.5;
+        dc.data[i * 2 + 1] = -0.25;
+    }
+    *float out = alloc<float>(96000);
+    defer free(out);
+    Mixer m = mixer_new(48000);
+
+    m.play(&tone, AudioPlay{});
+    m.render(out, 48000);
+    check("a 24 kHz tone resampled to 48 kHz keeps its 100 Hz", crossings(out, 48000) >= 99 && crossings(out, 48000) <= 101);
+    check("the tone ended after one second", m.count() == 0);
+
+    m.play(&tone, AudioPlay{pitch: 2.0});
+    m.render(out, 24000);
+    check("pitch 2 doubles the frequency", crossings(out, 24000) >= 99 && crossings(out, 24000) <= 101);
+    check("and halves the length", m.count() == 0);
+
+    m.play(&dc, AudioPlay{});
+    m.render(out, 10);
+    check("centered: equal power on both sides", near(out[0], 0.5 * 0.70710678, 0.0001) && near(out[1], -0.25 * 0.70710678, 0.0001));
+    m.stop_all();
+    m.play(&dc, AudioPlay{pan: -1.0, volume: 0.5});
+    m.render(out, 10);
+    check("pan left and volume", near(out[0], 0.25, 0.0001) && near(out[1], 0.0, 0.0001));
+    m.stop_all();
+    m.play(&dc, AudioPlay{volume: 0.0});
+    m.render(out, 10);
+    check("volume 0 is silent", out[0] == 0.0 && out[1] == 0.0);
+    m.stop_all();
+
+    uint32 id = m.play(&dc, AudioPlay{loop: true, pan: 1.0});
+    m.render(out, 1000);
+    check("a loop keeps playing", m.playing(id) && near(out[1998], 0.0, 0.0001) && near(out[1999], -0.25, 0.0001));
+    m.set_volume(id, 0.5);
+    m.render(out, 10);
+    check("set_volume", near(out[1], -0.125, 0.0001));
+    m.stop(id);
+    check("stop", !m.playing(id) && m.count() == 0);
+
+    m.play(&dc, AudioPlay{volume: 4.0});
+    m.play(&dc, AudioPlay{volume: 4.0});
+    m.render(out, 10);
+    check("the mix is clipped to [-1, 1]", out[0] <= 1.0 && out[1] >= -1.0);
+    m.free();
+    tone.free();
+    dc.free();
+    printf("mixer: %d failures\n", fails);
+    return fails == 0 ? 0 : 1;
+}

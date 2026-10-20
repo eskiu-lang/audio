@@ -1,0 +1,91 @@
+// WAV decoding against ffmpeg's own decoding of the same files (made by
+// tools/gen_test_audio.sh), a save and load round trip, and damaged files.
+import <io>;
+import <mem>;
+import <string>;
+import <fs>;
+import <libc>;
+import <audio/wav>;
+
+int fails = 0;
+
+void compare(string name, float tol) {
+    String path;
+    defer String_free(&path);
+    String_appendf(&path, "tests/data/%s.wav", name);
+    Result<Sound, string> r = wav_load(path.data);
+    if (!r.ok) {
+        printf("FAIL %s: %s\n", name, r.error);
+        fails++;
+        return;
+    }
+    Sound s = r.value;
+    defer s.free();
+    String_clear(&path);
+    String_appendf(&path, "tests/data/%s.f32", name);
+    int64 n = 0;
+    *float want = (*float)fs_read_all(path.data, &n);
+    defer free(want);
+    uint64 count = (uint64)n / 4;
+    if (s.frames * (uint64)s.channels != count) {
+        printf("FAIL %s: %llu samples, want %llu\n", name, s.frames * (uint64)s.channels, count);
+        fails++;
+        return;
+    }
+    float worst = 0.0;
+    for (i in 0..count) {
+        float d = fabsf(s.data[i] - want[i]);
+        if (d > worst) worst = d;
+    }
+    if (worst > tol) {
+        printf("FAIL %s: max error %g\n", name, (double)worst);
+        fails++;
+    }
+}
+
+int main() {
+    string[11] names = {"u8", "s16", "s24", "s32", "f32", "f64", "ima", "ima_mono", "ms", "ms_mono", "ext6"};
+    for (i in 0..11) compare(names[i], 0.0000001);
+
+    Sound tone = sound_new(1000, 2, 44100);
+    for (i in 0..2000) tone.data[i] = (float)sin((double)i * 0.05) * 0.9;
+    (void)wav_save("build/tone16.wav", &tone, 16);
+    (void)wav_save("build/tone32.wav", &tone, 32);
+    Sound a = wav_load("build/tone16.wav").value;
+    Sound b = wav_load("build/tone32.wav").value;
+    float e16 = 0.0;
+    float e32 = 0.0;
+    for (i in 0..2000) {
+        e16 = fabsf(a.data[i] - tone.data[i]) > e16 ? fabsf(a.data[i] - tone.data[i]) : e16;
+        e32 = fabsf(b.data[i] - tone.data[i]) > e32 ? fabsf(b.data[i] - tone.data[i]) : e32;
+    }
+    if (a.frames != 1000 || a.rate != 44100 || a.channels != 2 || e16 > 0.0001 || e32 != 0.0) {
+        printf("FAIL round trip: 16-bit error %g, float error %g\n", (double)e16, (double)e32);
+        fails++;
+    }
+    a.free();
+    b.free();
+    tone.free();
+
+    int64 len = 0;
+    *uint8 file = fs_read_all("tests/data/ms.wav", &len);
+    defer free(file);
+    uint32 seed = 3;
+    for (round in 0..600) {
+        *uint8 copy = alloc<uint8>(len);
+        memcpy(copy, file, len);
+        int64 cut = len;
+        if (round < 300) cut = (int64)round * len / 300;
+        else {
+            for (k in 0..3) {
+                seed = seed * 1103515245 + 12345;
+                copy[(int64)(seed >> 8) % len] = (uint8)(seed >> 3);
+            }
+        }
+        Result<Sound, string> r = wav_decode(copy, (uint64)cut);
+        if (r.ok) r.value.free();
+        free(copy);
+    }
+    printf("wav: %d failures\n", fails);
+    return fails == 0 ? 0 : 1;
+}

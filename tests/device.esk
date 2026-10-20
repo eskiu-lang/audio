@@ -1,0 +1,30 @@
+// Output through SDL3 with its dummy driver (silent, no audio hardware).
+import <io>;
+import <mem>;
+import <env>;
+import <libc>;
+import <audio>;
+
+int main() {
+    env_set("SDL_AUDIO_DRIVER", "dummy");
+    Result<AudioDevice, string> r = audio_open(48000);
+    if (!r.ok) {
+        printf("error: %s\n", r.error);
+        return 1;
+    }
+    AudioDevice out = r.value;
+    Sound beep = sound_new(4800, 1, 48000);
+    for (i in 0..4800) beep.data[i] = (float)sin((double)i * 0.06) * 0.2;
+    Mixer m = mixer_new(out.rate);
+    m.play(&beep, AudioPlay{});
+    Result<int, string> p = out.pump(&m, 50);
+    int queued = out.queued();
+    out.clear();
+    int cleared = out.queued();
+    out.close();
+    m.free();
+    beep.free();
+    bool ok = p.ok && queued >= 2400 && queued <= 2400 + 64 && cleared == 0;
+    printf("device: queued %d frames, %d after clear: %s\n", queued, cleared, ok ? "ok" : "FAIL");
+    return ok ? 0 : 1;
+}
