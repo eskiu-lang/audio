@@ -1,0 +1,172 @@
+// mixer.esk: mixes playing sounds into a stereo float stream.
+//
+//     Mixer m = mixer_new(48000);
+//     uint32 id = m.play(&jump, AudioPlay{volume: 0.8, pan: -0.3});
+//     m.render(out, 512);      // 512 stereo frames, interleaved
+//
+// Each voice reads its sound at its own rate and pitch (linear
+// interpolation), with volume, pan (-1 left to 1 right, equal power) and
+// looping. A mono sound plays on both sides; a sound with more than two
+// channels plays its first two. The sounds must live while they play.
+
+import <mem>;
+import <list>;
+import <libc>;
+import <audio/wav>;
+
+struct AudioPlay {
+    float volume = 1.0;
+    float pan;
+    float pitch = 1.0;
+    bool loop;
+}
+
+struct _Voice {
+    uint32 id;
+    *Sound sound;
+    double pos;
+    double step;
+    float left;
+    float right;
+    float volume;
+    float pan;
+    bool loop;
+}
+
+struct Mixer {
+    int rate;
+    float volume;
+    List<_Voice> voices;
+    uint32 next_id;
+}
+
+Mixer mixer_new(int rate) {
+    Mixer m;
+    m.rate = rate;
+    m.volume = 1.0;
+    m.next_id = 1;
+    return m;
+}
+
+void _voice_gains(_Voice* v) {
+    float pan = v.pan < -1.0 ? -1.0 : (v.pan > 1.0 ? 1.0 : v.pan);
+    double angle = ((double)pan + 1.0) * 0.7853981633974483;
+    v.left = v.volume * (float)cos(angle);
+    v.right = v.volume * (float)sin(angle);
+}
+
+// Starts sound and returns its voice id. AudioPlay{} plays at full volume,
+// centered, at the sound's own pitch, once.
+uint32 Mixer_play(*Mixer self, *Sound sound, AudioPlay opt) {
+    _Voice v;
+    v.id = self.next_id;
+    self.next_id++;
+    if (self.next_id == 0) self.next_id = 1;
+    v.sound = sound;
+    float pitch = opt.pitch > 0.0 ? opt.pitch : 1.0;
+    v.step = (double)pitch * (double)sound.rate / (double)self.rate;
+    v.volume = opt.volume;
+    v.pan = opt.pan;
+    v.loop = opt.loop;
+    _voice_gains(&v);
+    List_push(&self.voices, v);
+    return v.id;
+}
+
+_Voice* _mixer_voice(*Mixer self, uint32 id) {
+    for (i in 0..self.voices.size) {
+        if (self.voices.data[i].id == id) return &self.voices.data[i];
+    }
+    return null;
+}
+
+bool Mixer_playing(*Mixer self, uint32 id) {
+    return _mixer_voice(self, id) != null;
+}
+
+void Mixer_stop(*Mixer self, uint32 id) {
+    for (i in 0..self.voices.size) {
+        if (self.voices.data[i].id == id) {
+            self.voices.data[i] = self.voices.data[self.voices.size - 1];
+            self.voices.size--;
+            return;
+        }
+    }
+}
+
+void Mixer_stop_all(*Mixer self) {
+    self.voices.size = 0;
+}
+
+void Mixer_set_volume(*Mixer self, uint32 id, float volume) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    v.volume = volume;
+    _voice_gains(v);
+}
+
+void Mixer_set_pan(*Mixer self, uint32 id, float pan) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    v.pan = pan;
+    _voice_gains(v);
+}
+
+void Mixer_set_pitch(*Mixer self, uint32 id, float pitch) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null || pitch <= 0.0) return;
+    v.step = (double)pitch * (double)v.sound.rate / (double)self.rate;
+}
+
+int Mixer_count(*Mixer self) {
+    return self.voices.size;
+}
+
+float _sample(*Sound s, uint64 frame, int ch) {
+    int c = ch < s.channels ? ch : s.channels - 1;
+    return s.data[frame * (uint64)s.channels + (uint64)c];
+}
+
+// Writes frames stereo frames (2 * frames floats) of the mix into out and
+// advances every voice; voices that end are removed.
+void Mixer_render(*Mixer self, *float out, int frames) {
+    for (i in 0..frames * 2) out[i] = 0.0;
+    int k = 0;
+    while (k < self.voices.size) {
+        _Voice* v = &self.voices.data[k];
+        *Sound s = v.sound;
+        bool done = s.frames == 0;
+        for (f in 0..frames) {
+            if (done) break;
+            uint64 i0 = (uint64)v.pos;
+            double t = v.pos - (double)i0;
+            uint64 i1 = i0 + 1;
+            if (i1 >= s.frames) i1 = v.loop ? 0 : i0;
+            float l0 = _sample(s, i0, 0);
+            float l1 = _sample(s, i1, 0);
+            float r0 = _sample(s, i0, 1);
+            float r1 = _sample(s, i1, 1);
+            float l = l0 + (l1 - l0) * (float)t;
+            float r = r0 + (r1 - r0) * (float)t;
+            out[f * 2] += l * v.left;
+            out[f * 2 + 1] += r * v.right;
+            v.pos = v.pos + v.step;
+            if (v.pos >= (double)s.frames) {
+                if (v.loop) v.pos = v.pos - (double)s.frames * (double)(uint64)(v.pos / (double)s.frames);
+                else done = true;
+            }
+        }
+        if (done) {
+            self.voices.data[k] = self.voices.data[self.voices.size - 1];
+            self.voices.size--;
+        } else k++;
+    }
+    for (i in 0..frames * 2) {
+        float x = out[i] * self.volume;
+        out[i] = x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
+    }
+}
+
+void Mixer_free(*Mixer self) {
+    List_free(&self.voices);
+}
