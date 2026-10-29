@@ -123,6 +123,16 @@ eskiuc build -L/opt/homebrew/lib       # the directory that holds libSDL3
 | `<audio/mixer>` | `Mixer`, `mixer_new`, `play`, `then`, `stop`, `pause`, `resume`, `seek`, `position`, `current`, `set_volume`, `set_pan`, `set_pitch`, `render`, `AudioPlay` |
 | `<audio/device>` | `AudioDevice`, `audio_open`, `audio_open_with`, `AudioOptions`, `write`, `queued`, `pump`, `pause`, `resume`, `clear` (SDL3 on the desktop) |
 
+In a ui app, a sound in the app's `assets/` loads by the path ui's `ui_asset_path` gives (in
+the bundle on iOS, copied out of the APK on Android), and a remote one by the path of
+`use_cached_file` or `ui_cached_file` once it is downloaded:
+
+```eskiu
+string path = ui_asset_path("music/battle.m4a");
+Sound battle = sound_load(path)?;
+free(path);
+```
+
 ## Contributing
 
 Bug reports are welcome; please include the program and the `eskiuc --version` output. The
