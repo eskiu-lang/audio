@@ -14,7 +14,7 @@
 
 <p align="center">
   <a href="https://github.com/eskiu-lang/audio/actions/workflows/ci.yml"><img src="https://github.com/eskiu-lang/audio/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-0.1.0-6448d4" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/version-0.2.0-6448d4" alt="Version 0.2.0">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
 </p>
 
@@ -109,7 +109,7 @@ your Linux distribution or a build from source, the `SDL3-devel-*-mingw` archive
 Then, in an Eskiu package (Eskiu 0.12 or newer):
 
 ```bash
-eskiuc add audio --git https://github.com/eskiu-lang/audio --rev v0.1.0
+eskiuc add audio --git https://github.com/eskiu-lang/audio --rev v0.2.0
 eskiuc build -L/opt/homebrew/lib       # the directory that holds libSDL3
 ```
 
