@@ -76,6 +76,44 @@ int main() {
     m.play(&dc, AudioPlay{volume: 4.0});
     m.render(out, 10);
     check("the mix is clipped to [-1, 1]", out[0] <= 1.0 && out[1] >= -1.0);
+    m.stop_all();
+
+    // An intro, then its loop with no gap, at the mixer's rate (pan left: the left channel
+    // carries the sound at full volume).
+    Sound intro = sound_new(100, 1, 48000);
+    Sound loop = sound_new(50, 1, 48000);
+    for (i in 0..100) intro.data[i] = 0.1;
+    for (i in 0..50) loop.data[i] = -0.2;
+    uint32 song = m.play(&intro, AudioPlay{pan: -1.0});
+    m.then(song, &loop, true);
+    m.render(out, 250);
+    check("the intro plays first", near(out[0], 0.1, 0.0001) && near(out[98 * 2], 0.1, 0.0001));
+    check("the loop follows with no gap", near(out[100 * 2], -0.2, 0.0001) && near(out[101 * 2], -0.2, 0.0001));
+    check("and keeps looping", near(out[249 * 2], -0.2, 0.0001) && m.playing(song));
+    check("the current sound is the loop", m.current(song) == &loop);
+    check("its position", m.position(song) >= 0.0 && m.position(song) < 50.0 / 48000.0);
+    m.pause(song);
+    m.render(out, 10);
+    check("a paused voice is silent", out[0] == 0.0 && m.paused(song) && m.playing(song));
+    m.resume(song);
+    m.seek(song, 0.0);
+    m.render(out, 10);
+    check("resumed from its place", near(out[0], -0.2, 0.0001) && !m.paused(song));
+    check("a voice not playing has no position", m.position(9999) == -1.0);
+    m.stop_all();
+
+    // What follows at another rate keeps its pitch.
+    Sound slow = sound_new(24000, 1, 24000);
+    for (i in 0..24000) slow.data[i] = (float)sin(6.283185307179586 * 100.0 * (double)i / 24000.0) * 0.5;
+    uint32 two = m.play(&intro, AudioPlay{});
+    m.then(two, &slow, false);
+    m.render(out, 100);
+    m.render(out, 48000);
+    check("a 24 kHz sound after the intro keeps its 100 Hz", crossings(out, 48000) >= 99 && crossings(out, 48000) <= 101);
+    intro.free();
+    loop.free();
+    slow.free();
+
     m.free();
     tone.free();
     dc.free();

@@ -57,8 +57,17 @@ Result<int, string> run() {
 
 `AudioPlay{}` plays at full volume, centered, once; `AudioPlay{loop: true, pitch: 1.5}` loops
 it a fifth higher. A voice can change while it plays (`set_volume`,
-`set_pan`, `set_pitch`) and stop (`stop`, `stop_all`). [`examples/play.esk`](examples/play.esk)
-plays a WAV file or, given none, a chord it makes on the spot.
+`set_pan`, `set_pitch`), pause (`pause`, `resume`), move (`seek`, `position` in seconds) and
+stop (`stop`, `stop_all`). `then` chains a sound after a voice's with no gap, for a song's intro
+and its loop:
+
+```eskiu
+uint32 song = m.play(&intro, AudioPlay{});
+m.then(song, &loop, true);    // the loop starts on the sample after the intro's last
+```
+
+[`examples/play.esk`](examples/play.esk) plays a WAV file or, given none, a chord it makes on
+the spot.
 
 ## Platforms
 
@@ -110,7 +119,7 @@ eskiuc build -L/opt/homebrew/lib       # the directory that holds libSDL3
 |---|---|
 | `<audio>` | the three modules below |
 | `<audio/wav>` | `Sound`, `wav_load`, `wav_decode`, `wav_save`, `sound_new` |
-| `<audio/mixer>` | `Mixer`, `mixer_new`, `play`, `stop`, `set_volume`, `set_pan`, `set_pitch`, `render`, `AudioPlay` |
+| `<audio/mixer>` | `Mixer`, `mixer_new`, `play`, `then`, `stop`, `pause`, `resume`, `seek`, `position`, `current`, `set_volume`, `set_pan`, `set_pitch`, `render`, `AudioPlay` |
 | `<audio/device>` | `AudioDevice`, `audio_open`, `write`, `queued`, `pump`, `pause`, `resume`, `clear` (links SDL3) |
 
 ## Contributing

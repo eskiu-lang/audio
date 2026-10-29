@@ -31,6 +31,10 @@ struct _Voice {
     float volume;
     float pan;
     bool loop;
+    float pitch;
+    *Sound next;
+    bool next_loop;
+    bool paused;
 }
 
 struct Mixer {
@@ -64,6 +68,7 @@ uint32 Mixer_play(*Mixer self, *Sound sound, AudioPlay opt) {
     if (self.next_id == 0) self.next_id = 1;
     v.sound = sound;
     float pitch = opt.pitch > 0.0 ? opt.pitch : 1.0;
+    v.pitch = pitch;
     v.step = (double)pitch * (double)sound.rate / (double)self.rate;
     v.volume = opt.volume;
     v.pan = opt.pan;
@@ -115,7 +120,55 @@ void Mixer_set_pan(*Mixer self, uint32 id, float pan) {
 void Mixer_set_pitch(*Mixer self, uint32 id, float pitch) {
     _Voice* v = _mixer_voice(self, id);
     if (v == null || pitch <= 0.0) return;
+    v.pitch = pitch;
     v.step = (double)pitch * (double)v.sound.rate / (double)self.rate;
+}
+
+// When the voice's sound ends, `sound` follows it with no gap, looping or not: an intro
+// then its loop. A later call replaces what follows; a looping voice never ends, so nothing
+// follows it.
+void Mixer_then(*Mixer self, uint32 id, *Sound sound, bool loop) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    v.next = sound;
+    v.next_loop = loop;
+}
+
+// The sound the voice is playing now (the one that followed, after Mixer_then), or null.
+*Sound Mixer_current(*Mixer self, uint32 id) {
+    _Voice* v = _mixer_voice(self, id);
+    return v == null ? null : v.sound;
+}
+
+// Where the voice is in its current sound, in seconds, or -1 when it is not playing.
+double Mixer_position(*Mixer self, uint32 id) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return -1.0;
+    return v.pos / (double)v.sound.rate;
+}
+
+// Moves the voice to `seconds` into its current sound.
+void Mixer_seek(*Mixer self, uint32 id, double seconds) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    double at = seconds * (double)v.sound.rate;
+    v.pos = at < 0 ? 0 : (at >= (double)v.sound.frames ? (double)v.sound.frames - 1 : at);
+}
+
+// A paused voice keeps its place and adds nothing to the mix until it is resumed.
+void Mixer_pause(*Mixer self, uint32 id) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v != null) v.paused = true;
+}
+
+void Mixer_resume(*Mixer self, uint32 id) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v != null) v.paused = false;
+}
+
+bool Mixer_paused(*Mixer self, uint32 id) {
+    _Voice* v = _mixer_voice(self, id);
+    return v != null && v.paused;
 }
 
 int Mixer_count(*Mixer self) {
@@ -134,10 +187,12 @@ void Mixer_render(*Mixer self, *float out, int frames) {
     int k = 0;
     while (k < self.voices.size) {
         _Voice* v = &self.voices.data[k];
+        if (v.paused) { k++; continue; }
         *Sound s = v.sound;
         bool done = s.frames == 0;
         for (f in 0..frames) {
             if (done) break;
+            s = v.sound;
             uint64 i0 = (uint64)v.pos;
             double t = v.pos - (double)i0;
             uint64 i1 = i0 + 1;
@@ -153,6 +208,15 @@ void Mixer_render(*Mixer self, *float out, int frames) {
             v.pos = v.pos + v.step;
             if (v.pos >= (double)s.frames) {
                 if (v.loop) v.pos = v.pos - (double)s.frames * (double)(uint64)(v.pos / (double)s.frames);
+                else if (v.next != null && v.next.frames > 0) {
+                    // What is left over carries into the next sound, at its rate.
+                    double over = (v.pos - (double)s.frames) / (double)s.rate * (double)v.next.rate;
+                    v.sound = v.next;
+                    v.loop = v.next_loop;
+                    v.next = null;
+                    v.step = (double)v.pitch * (double)v.sound.rate / (double)self.rate;
+                    v.pos = over < (double)v.sound.frames ? over : 0;
+                }
                 else done = true;
             }
         }
