@@ -1,5 +1,6 @@
-// device.esk: sound output through SDL3. A program that imports it links
-// SDL3; <audio/wav> and <audio/mixer> alone do not.
+// device.esk: sound output: SDL3 on macOS, Linux and Windows (a program that imports it
+// links SDL3; <audio/wav> and <audio/mixer> alone do not), a RemoteIO audio unit on iOS and
+// AAudio on Android (native/, built in by eskiu-lang/ui apps).
 //
 //     AudioDevice out = audio_open(48000)?;
 //     defer out.close();
@@ -14,10 +15,90 @@ import <mem>;
 import <result>;
 import <audio/mixer>;
 
-#if defined(__wasm__) || defined(__ANDROID__) || defined(TARGET_OS_IPHONE)
-#error "audio: <audio/device> runs on macOS, Linux and Windows for now; <audio/wav> and <audio/mixer> work everywhere"
+#ifdef __wasm__
+#error "audio: <audio/device> runs on macOS, Linux, Windows, iOS and Android; <audio/wav> and <audio/mixer> work everywhere"
 #endif
 
+// How the output shares the device. mix_with_others lets other apps' sound go on (iOS; on
+// Android media always mixes); ignore_silent plays with the iPhone's ringer switch on silent
+// (otherwise the switch mutes it); game marks the stream as a game's (Android's usage);
+// buffer_ms is the most that can be queued ahead (iOS and Android).
+struct AudioOptions {
+    bool mix_with_others;
+    bool ignore_silent;
+    bool game;
+    int buffer_ms = 500;
+}
+
+// Stereo float output at rate frames per second.
+struct AudioDevice {
+    *void stream;
+    int rate;
+    *float scratch;
+    int scratch_frames;
+}
+
+// Opens the default output with the default options: it stops other apps' sound and the
+// ringer switch mutes it.
+Result<AudioDevice, string> audio_open(int rate) { return audio_open_with(rate, AudioOptions{}); }
+
+// Mixes and queues enough of mixer to keep ahead_ms milliseconds queued;
+// call it every frame of the program's loop.
+Result<int, string> AudioDevice_pump(*AudioDevice self, *Mixer mixer, int ahead_ms) {
+    int want = self.rate * ahead_ms / 1000;
+    int missing = want - AudioDevice_queued(self);
+    if (missing <= 0) return Ok<int, string>(0);
+    if (missing > self.scratch_frames) {
+        if (self.scratch != null) free(self.scratch);
+        self.scratch = alloc<float>(missing * 2);
+        self.scratch_frames = missing;
+    }
+    Mixer_render(mixer, self.scratch, missing);
+    return AudioDevice_write(self, self.scratch, missing);
+}
+
+#if defined(__ANDROID__) || defined(TARGET_OS_IPHONE)
+extern *void audio_native_open(int rate, int buffer_frames, int mix_with_others, int ignore_silent, int game);
+extern string audio_native_error();
+extern int audio_native_write(*void handle, *float samples, int frames);
+extern int audio_native_queued(*void handle);
+extern void audio_native_pause(*void handle);
+extern void audio_native_resume(*void handle);
+extern void audio_native_clear(*void handle);
+extern void audio_native_close(*void handle);
+
+Result<AudioDevice, string> audio_open_with(int rate, AudioOptions options) {
+    int buffer = rate * (options.buffer_ms > 0 ? options.buffer_ms : 500) / 1000;
+    *void stream = audio_native_open(rate, buffer, options.mix_with_others ? 1 : 0, options.ignore_silent ? 1 : 0,
+        options.game ? 1 : 0);
+    if (stream == null) return Err<AudioDevice, string>(audio_native_error());
+    return Ok<AudioDevice, string>(AudioDevice{stream, rate, null, 0});
+}
+
+// Queues frames stereo frames (interleaved floats) for playback; what does not fit in the
+// buffer (buffer_ms) is dropped.
+Result<int, string> AudioDevice_write(*AudioDevice self, *float samples, int frames) {
+    audio_native_write(self.stream, samples, frames);
+    return Ok<int, string>(0);
+}
+
+// Frames queued and not yet played.
+int AudioDevice_queued(*AudioDevice self) { return audio_native_queued(self.stream); }
+
+void AudioDevice_pause(*AudioDevice self) { audio_native_pause(self.stream); }
+
+void AudioDevice_resume(*AudioDevice self) { audio_native_resume(self.stream); }
+
+// Drops what is queued and not yet played.
+void AudioDevice_clear(*AudioDevice self) { audio_native_clear(self.stream); }
+
+void AudioDevice_close(*AudioDevice self) {
+    if (self.stream != null) audio_native_close(self.stream);
+    if (self.scratch != null) free(self.scratch);
+    self.stream = null;
+    self.scratch = null;
+}
+#else
 #pragma link("SDL3")
 
 struct _SdlSpec {
@@ -40,17 +121,9 @@ extern void SDL_DestroyAudioStream(*void stream);
 const uint32 _SDL_INIT_AUDIO = 0x10;
 const uint32 _SDL_AUDIO_F32 = 0x8120;
 
-// Stereo float output at rate frames per second.
-struct AudioDevice {
-    *void stream;
-    int rate;
-    *float scratch;
-    int scratch_frames;
-}
-
 // Opens the default output device for stereo float samples at rate Hz (SDL
-// converts to what the device wants).
-Result<AudioDevice, string> audio_open(int rate) {
+// converts to what the device wants). The options are iOS's and Android's.
+Result<AudioDevice, string> audio_open_with(int rate, AudioOptions options) {
     if (!SDL_Init(_SDL_INIT_AUDIO)) return Err<AudioDevice, string>(SDL_GetError());
     _SdlSpec spec = _SdlSpec{_SDL_AUDIO_F32, 2, rate};
     *void stream = SDL_OpenAudioDeviceStream(0xFFFFFFFF, &spec, null, null);
@@ -72,21 +145,6 @@ Result<int, string> AudioDevice_write(*AudioDevice self, *float samples, int fra
 int AudioDevice_queued(*AudioDevice self) {
     int bytes = SDL_GetAudioStreamQueued(self.stream);
     return bytes < 0 ? 0 : bytes / 8;
-}
-
-// Mixes and queues enough of mixer to keep ahead_ms milliseconds queued;
-// call it every frame of the program's loop.
-Result<int, string> AudioDevice_pump(*AudioDevice self, *Mixer mixer, int ahead_ms) {
-    int want = self.rate * ahead_ms / 1000;
-    int missing = want - AudioDevice_queued(self);
-    if (missing <= 0) return Ok<int, string>(0);
-    if (missing > self.scratch_frames) {
-        if (self.scratch != null) free(self.scratch);
-        self.scratch = alloc<float>(missing * 2);
-        self.scratch_frames = missing;
-    }
-    Mixer_render(mixer, self.scratch, missing);
-    return AudioDevice_write(self, self.scratch, missing);
 }
 
 void AudioDevice_pause(*AudioDevice self) {
@@ -111,3 +169,4 @@ void AudioDevice_close(*AudioDevice self) {
     self.stream = null;
     self.scratch = null;
 }
+#endif
