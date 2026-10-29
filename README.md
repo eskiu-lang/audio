@@ -120,7 +120,7 @@ eskiuc build -L/opt/homebrew/lib       # the directory that holds libSDL3
 | `<audio>` | the three modules below |
 | `<audio/wav>` | `Sound`, `wav_load`, `wav_decode`, `wav_save`, `sound_new` |
 | `<audio/mixer>` | `Mixer`, `mixer_new`, `play`, `then`, `stop`, `pause`, `resume`, `seek`, `position`, `current`, `set_volume`, `set_pan`, `set_pitch`, `render`, `AudioPlay` |
-| `<audio/device>` | `AudioDevice`, `audio_open`, `write`, `queued`, `pump`, `pause`, `resume`, `clear` (links SDL3) |
+| `<audio/device>` | `AudioDevice`, `audio_open`, `audio_open_with`, `AudioOptions`, `write`, `queued`, `pump`, `pause`, `resume`, `clear` (SDL3 on the desktop) |
 
 ## Contributing
 
