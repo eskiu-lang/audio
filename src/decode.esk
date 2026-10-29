@@ -1,0 +1,40 @@
+// decode.esk: sound_load reads a sound file into a Sound: WAV on every platform (<audio/wav>),
+// and on iOS and Android also what the system decodes (MP3, AAC / M4A, FLAC; Ogg Vorbis and
+// Opus on Android) through its own codecs (native/, built in by eskiu-lang/ui apps). A file
+// from the network is downloaded first (ui_fetch, <fetch>) and loaded from disk.
+//
+//     Sound music = sound_load(path)?;
+//     defer music.free();
+
+import <mem>;
+import <string>;
+import <result>;
+import <audio/wav>;
+
+#if defined(__ANDROID__) || defined(TARGET_OS_IPHONE)
+extern *float audio_native_decode(string path, *int64 frames, *int channels, *int rate);
+extern string audio_native_error();
+#endif
+
+bool _sound_is_wav(string path) {
+    int64 n = strlen(path);
+    if (n < 4) return false;
+    string end = path + (n - 4);
+    return (end[0] == '.') && (end[1] == 'w' || end[1] == 'W') && (end[2] == 'a' || end[2] == 'A') &&
+        (end[3] == 'v' || end[3] == 'V');
+}
+
+// Reads and decodes the sound file at `path` (by its name: .wav is read by <audio/wav>).
+Result<Sound, string> sound_load(string path) {
+    if (_sound_is_wav(path)) return wav_load(path);
+#if defined(__ANDROID__) || defined(TARGET_OS_IPHONE)
+    int64 frames = 0;
+    int channels = 0;
+    int rate = 0;
+    *float data = audio_native_decode(path, &frames, &channels, &rate);
+    if (data == null) return Err<Sound, string>(audio_native_error());
+    return Ok<Sound, string>(Sound{data, (uint64)frames, channels, rate});
+#else
+    return Err<Sound, string>("audio: only WAV is read on this platform (other formats on iOS and Android)");
+#endif
+}

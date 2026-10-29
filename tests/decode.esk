@@ -1,0 +1,11 @@
+import <io>;
+import <audio/decode>;
+int main() {
+    Result<Sound, string> s = sound_load("tests/data/f32.wav");
+    if (!s.ok) { printf("FAIL %s\n", s.error); return 1; }
+    Result<Sound, string> m = sound_load("x.mp3");
+    if (m.ok) { printf("FAIL mp3 on desktop\n"); return 1; }
+    printf("PASS decode\n");
+    s.value.free();
+    return 0;
+}

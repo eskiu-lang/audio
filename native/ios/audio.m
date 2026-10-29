@@ -143,3 +143,57 @@ void audio_native_close(void *handle) {
     free(a->data);
     free(a);
 }
+
+// Decodes a whole file the system reads (MP3, AAC / M4A, CAF, AIFF, WAV, FLAC) to interleaved
+// float frames, one or two channels, at the file's rate; the caller frees the frames. NULL
+// with audio_native_error() set when it cannot.
+float *audio_native_decode(const char *path, int64_t *frames, int *channels, int *rate) {
+    audio_error[0] = 0;
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+    ExtAudioFileRef file = NULL;
+    OSStatus status = ExtAudioFileOpenURL(url, &file);
+    CFRelease(url);
+    if (status != noErr) { fail("audio: cannot open the file", status); return NULL; }
+    AudioStreamBasicDescription source;
+    UInt32 size = sizeof source;
+    ExtAudioFileGetProperty(file, kExtAudioFileProperty_FileDataFormat, &size, &source);
+    SInt64 length = 0;
+    size = sizeof length;
+    ExtAudioFileGetProperty(file, kExtAudioFileProperty_FileLengthFrames, &size, &length);
+    int count = source.mChannelsPerFrame >= 2 ? 2 : 1;
+    AudioStreamBasicDescription client = {0};
+    client.mSampleRate = source.mSampleRate;
+    client.mFormatID = kAudioFormatLinearPCM;
+    client.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    client.mChannelsPerFrame = count;
+    client.mBitsPerChannel = 32;
+    client.mBytesPerFrame = 4 * count;
+    client.mFramesPerPacket = 1;
+    client.mBytesPerPacket = 4 * count;
+    status = ExtAudioFileSetProperty(file, kExtAudioFileProperty_ClientDataFormat, sizeof client, &client);
+    if (status != noErr) { ExtAudioFileDispose(file); fail("audio: cannot convert the file", status); return NULL; }
+    uint64_t capacity = length > 0 ? (uint64_t)length + 4096 : 1 << 20;
+    float *data = malloc(capacity * count * sizeof(float));
+    uint64_t have = 0;
+    for (;;) {
+        if (capacity - have < 4096) {
+            capacity *= 2;
+            data = realloc(data, capacity * count * sizeof(float));
+        }
+        AudioBufferList list;
+        list.mNumberBuffers = 1;
+        list.mBuffers[0].mNumberChannels = count;
+        list.mBuffers[0].mDataByteSize = (UInt32)((capacity - have) * count * sizeof(float));
+        list.mBuffers[0].mData = data + have * count;
+        UInt32 read = (UInt32)(capacity - have);
+        status = ExtAudioFileRead(file, &read, &list);
+        if (status != noErr) { ExtAudioFileDispose(file); free(data); fail("audio: cannot decode the file", status); return NULL; }
+        if (read == 0) break;
+        have += read;
+    }
+    ExtAudioFileDispose(file);
+    *frames = (int64_t)have;
+    *channels = count;
+    *rate = (int)source.mSampleRate;
+    return data;
+}

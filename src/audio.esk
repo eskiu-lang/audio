@@ -6,3 +6,4 @@
 import <audio/wav>;
 import <audio/mixer>;
 import <audio/device>;
+import <audio/decode>;

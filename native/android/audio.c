@@ -231,3 +231,183 @@ void audio_native_close(void *handle) {
     free(a->data);
     a->data = NULL;
 }
+
+// Decoding through the NDK's media codecs (libmediandk, loaded with dlopen like AAudio).
+typedef struct AMediaExtractor AMediaExtractor;
+typedef struct AMediaFormat AMediaFormat;
+typedef struct AMediaCodec AMediaCodec;
+typedef struct { int32_t offset; int32_t size; int64_t time; uint32_t flags; } CodecBufferInfo;
+
+static struct {
+    AMediaExtractor *(*extractor_new)(void);
+    int (*set_source)(AMediaExtractor *, const char *);
+    size_t (*track_count)(AMediaExtractor *);
+    AMediaFormat *(*track_format)(AMediaExtractor *, size_t);
+    int (*select_track)(AMediaExtractor *, size_t);
+    ssize_t (*read_sample)(AMediaExtractor *, uint8_t *, size_t);
+    int64_t (*sample_time)(AMediaExtractor *);
+    int (*advance)(AMediaExtractor *);
+    int (*extractor_delete)(AMediaExtractor *);
+    int (*get_string)(AMediaFormat *, const char *, const char **);
+    int (*get_int32)(AMediaFormat *, const char *, int32_t *);
+    int (*format_delete)(AMediaFormat *);
+    AMediaCodec *(*create_decoder)(const char *);
+    int (*configure)(AMediaCodec *, const AMediaFormat *, void *, void *, uint32_t);
+    int (*codec_start)(AMediaCodec *);
+    int (*codec_stop)(AMediaCodec *);
+    int (*codec_delete)(AMediaCodec *);
+    ssize_t (*dequeue_input)(AMediaCodec *, int64_t);
+    uint8_t *(*input_buffer)(AMediaCodec *, size_t, size_t *);
+    int (*queue_input)(AMediaCodec *, size_t, int64_t, size_t, uint64_t, uint32_t);
+    ssize_t (*dequeue_output)(AMediaCodec *, CodecBufferInfo *, int64_t);
+    uint8_t *(*output_buffer)(AMediaCodec *, size_t, size_t *);
+    AMediaFormat *(*output_format)(AMediaCodec *);
+    int (*release_output)(AMediaCodec *, size_t, int);
+    int loaded;
+} md;
+
+static int load_media(void) {
+    if (md.loaded) return 1;
+    void *lib = dlopen("libmediandk.so", RTLD_NOW);
+    if (!lib) { snprintf(audio_error, sizeof audio_error, "audio: the media codecs are not available"); return 0; }
+#define SYM(field, name) *(void **)&md.field = dlsym(lib, name)
+    SYM(extractor_new, "AMediaExtractor_new");
+    SYM(set_source, "AMediaExtractor_setDataSource");
+    SYM(track_count, "AMediaExtractor_getTrackCount");
+    SYM(track_format, "AMediaExtractor_getTrackFormat");
+    SYM(select_track, "AMediaExtractor_selectTrack");
+    SYM(read_sample, "AMediaExtractor_readSampleData");
+    SYM(sample_time, "AMediaExtractor_getSampleTime");
+    SYM(advance, "AMediaExtractor_advance");
+    SYM(extractor_delete, "AMediaExtractor_delete");
+    SYM(get_string, "AMediaFormat_getString");
+    SYM(get_int32, "AMediaFormat_getInt32");
+    SYM(format_delete, "AMediaFormat_delete");
+    SYM(create_decoder, "AMediaCodec_createDecoderByType");
+    SYM(configure, "AMediaCodec_configure");
+    SYM(codec_start, "AMediaCodec_start");
+    SYM(codec_stop, "AMediaCodec_stop");
+    SYM(codec_delete, "AMediaCodec_delete");
+    SYM(dequeue_input, "AMediaCodec_dequeueInputBuffer");
+    SYM(input_buffer, "AMediaCodec_getInputBuffer");
+    SYM(queue_input, "AMediaCodec_queueInputBuffer");
+    SYM(dequeue_output, "AMediaCodec_dequeueOutputBuffer");
+    SYM(output_buffer, "AMediaCodec_getOutputBuffer");
+    SYM(output_format, "AMediaCodec_getOutputFormat");
+    SYM(release_output, "AMediaCodec_releaseOutputBuffer");
+#undef SYM
+    if (!md.extractor_new || !md.create_decoder || !md.dequeue_output || !md.release_output) {
+        snprintf(audio_error, sizeof audio_error, "audio: the media codecs are incomplete on this system");
+        return 0;
+    }
+    md.loaded = 1;
+    return 1;
+}
+
+enum { CODEC_EOS = 4, CODEC_FORMAT_CHANGED = -2, PCM_FLOAT = 4 };
+
+// Decodes a whole file the system reads (MP3, AAC / M4A, Ogg Vorbis, Opus, FLAC, WAV) to
+// interleaved float frames, one or two channels, at the file's rate; the caller frees the
+// frames. NULL with audio_native_error() set when it cannot.
+float *audio_native_decode(const char *path, int64_t *frames, int *channels, int *rate) {
+    audio_error[0] = 0;
+    if (!load_media()) return NULL;
+    AMediaExtractor *ex = md.extractor_new();
+    if (md.set_source(ex, path) != 0) {
+        md.extractor_delete(ex);
+        snprintf(audio_error, sizeof audio_error, "audio: cannot open %s", path);
+        return NULL;
+    }
+    AMediaFormat *format = NULL;
+    const char *mime = NULL;
+    for (size_t i = 0; i < md.track_count(ex); i++) {
+        AMediaFormat *f = md.track_format(ex, i);
+        const char *m = NULL;
+        if (md.get_string(f, "mime", &m) && m && strncmp(m, "audio/", 6) == 0) {
+            md.select_track(ex, i);
+            format = f;
+            mime = m;
+            break;
+        }
+        md.format_delete(f);
+    }
+    if (!format) {
+        md.extractor_delete(ex);
+        snprintf(audio_error, sizeof audio_error, "audio: no audio track in %s", path);
+        return NULL;
+    }
+    int32_t in_rate = 0, in_channels = 0;
+    md.get_int32(format, "sample-rate", &in_rate);
+    md.get_int32(format, "channel-count", &in_channels);
+    AMediaCodec *codec = md.create_decoder(mime);
+    if (!codec || md.configure(codec, format, NULL, NULL, 0) != 0 || md.codec_start(codec) != 0) {
+        if (codec) md.codec_delete(codec);
+        md.format_delete(format);
+        md.extractor_delete(ex);
+        snprintf(audio_error, sizeof audio_error, "audio: no decoder for %s", mime);
+        return NULL;
+    }
+    md.format_delete(format);
+    int out_channels = in_channels > 0 ? in_channels : 2, out_rate = in_rate, encoding = 2;
+    int keep = out_channels >= 2 ? 2 : 1;
+    uint64_t capacity = 1 << 16, have = 0;
+    float *data = malloc(capacity * 2 * sizeof(float));
+    int input_done = 0;
+    for (;;) {
+        if (!input_done) {
+            ssize_t in = md.dequeue_input(codec, 5000);
+            if (in >= 0) {
+                size_t room = 0;
+                uint8_t *buffer = md.input_buffer(codec, (size_t)in, &room);
+                ssize_t n = md.read_sample(ex, buffer, room);
+                if (n < 0) {
+                    md.queue_input(codec, (size_t)in, 0, 0, 0, CODEC_EOS);
+                    input_done = 1;
+                } else {
+                    md.queue_input(codec, (size_t)in, 0, (size_t)n, (uint64_t)md.sample_time(ex), 0);
+                    md.advance(ex);
+                }
+            }
+        }
+        CodecBufferInfo info;
+        ssize_t out = md.dequeue_output(codec, &info, 5000);
+        if (out == CODEC_FORMAT_CHANGED) {
+            AMediaFormat *f = md.output_format(codec);
+            int32_t v;
+            if (md.get_int32(f, "channel-count", &v) && v > 0) out_channels = v;
+            if (md.get_int32(f, "sample-rate", &v) && v > 0) out_rate = v;
+            if (md.get_int32(f, "pcm-encoding", &v)) encoding = v;
+            md.format_delete(f);
+            keep = out_channels >= 2 ? 2 : 1;
+            continue;
+        }
+        if (out < 0) continue;
+        size_t size = 0;
+        uint8_t *buffer = md.output_buffer(codec, (size_t)out, &size);
+        int bytes = encoding == PCM_FLOAT ? 4 : 2;
+        uint64_t count = (uint64_t)info.size / (uint64_t)(bytes * out_channels);
+        while (have + count > capacity) {
+            capacity *= 2;
+            data = realloc(data, capacity * 2 * sizeof(float));
+        }
+        for (uint64_t i = 0; i < count; i++) {
+            for (int c = 0; c < keep; c++) {
+                uint64_t at = (i * out_channels + c) * bytes + (uint64_t)info.offset;
+                float v;
+                if (encoding == PCM_FLOAT) memcpy(&v, buffer + at, 4);
+                else { int16_t s; memcpy(&s, buffer + at, 2); v = s / 32768.0f; }
+                data[(have + i) * keep + c] = v;
+            }
+        }
+        have += count;
+        md.release_output(codec, (size_t)out, 0);
+        if (info.flags & CODEC_EOS) break;
+    }
+    md.codec_stop(codec);
+    md.codec_delete(codec);
+    md.extractor_delete(ex);
+    *frames = (int64_t)have;
+    *channels = keep;
+    *rate = out_rate;
+    return data;
+}
