@@ -62,14 +62,36 @@ plays a WAV file or, given none, a chord it makes on the spot.
 
 ## Platforms
 
-| Modules | macOS, Linux, Windows | iOS, Android, WebAssembly |
-|---|---|---|
-| `<audio/wav>`, `<audio/mixer>` | yes | yes |
-| `<audio/device>` (and `<audio>`, which imports it) | yes | not yet |
+| Modules | macOS, Linux, Windows | iOS, Android | WebAssembly |
+|---|---|---|---|
+| `<audio/wav>`, `<audio/mixer>` | yes | yes | yes |
+| `<audio/device>` (and `<audio>`, which imports it) | SDL3 | yes, in an [eskiu-lang/ui](https://github.com/eskiu-lang/ui) app | not yet |
 
-`<audio/wav>` and `<audio/mixer>` are plain Eskiu and work on every target. Building
-`<audio/device>` for a phone or for WebAssembly stops with an `#error`: SDL3 runs there, but
-it is not checked yet.
+On a phone `<audio/device>` needs no SDL3: its native code (`native/`), which a ui app builds
+in, plays through a RemoteIO audio unit on iOS and AAudio on Android (Android 8 or later,
+loaded at run time). The calls are the same everywhere. `audio_open_with(rate, options)`
+says how the output shares the device:
+
+```eskiu
+AudioDevice out = audio_open_with(48000, AudioOptions{mix_with_others: true, game: true})?;
+```
+
+| `AudioOptions` | Means |
+|---|---|
+| `mix_with_others` | other apps' sound goes on (iOS; on Android media always mixes) |
+| `ignore_silent` | it plays with the iPhone's ringer switch on silent (otherwise the switch mutes it) |
+| `game` | the stream is a game's (Android's usage and content type) |
+| `buffer_ms` | the most that can be queued ahead on a phone (default 500) |
+
+In a ui app, mix ahead once per display frame and pause in the background:
+
+```eskiu
+use_frame(playing.get(), void(Tick tick) { (void)out.pump(&mixer, 100); });
+use_app_state(void(bool active) { if (active) { out.resume(); } else { out.pause(); } });
+```
+
+[`examples/ui`](examples/ui) plays a tone that way (`ui run ios`, or `android`). An Android
+stream whose output goes away (headphones unplugged) opens again on the new one.
 
 ## Install
 

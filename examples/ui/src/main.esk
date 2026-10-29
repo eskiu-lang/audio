@@ -1,0 +1,67 @@
+// Sound in a ui app: a tone from <audio/mixer>, mixed ahead once per display frame and paused
+// while the app is in the background. `ui run ios` (or android).
+import <math>;
+import <string>;
+import <ui>;
+import <ui/kit>;
+import <audio/wav>;
+import <audio/mixer>;
+import <audio/device>;
+
+AudioDevice out;
+Mixer mixer;
+Sound tone;
+bool opened;
+string failure;
+
+void open_audio() {
+    Result<AudioDevice, string> device = audio_open_with(48000, AudioOptions{mix_with_others: true, game: true});
+    if (!device.ok) { failure = device.error; return; }
+    out = device.value;
+    mixer = mixer_new(48000);
+    // A second of a 440 Hz tone that fades in and out, looped.
+    tone = sound_new(48000, 1, 48000);
+    for (i in 0..48000) {
+        double t = i / 48000.0;
+        double envelope = sin(3.14159265 * t);
+        tone.data[i] = (float)(0.3 * envelope * sin(2 * 3.14159265 * 440 * t));
+    }
+    opened = true;
+}
+
+void Demo() {
+    *Signal<bool> playing = use_signal<bool>(false);
+    *Signal<int> queued = use_signal<int>(0);
+    use_mount(void() { open_audio(); }, void() {});
+    use_app_state(void(bool active) {
+        if (!opened) return;
+        if (active) { out.resume(); } else { out.pause(); }
+    });
+    use_frame(opened && playing.get(), void(Tick tick) {
+        (void)out.pump(&mixer, 100);
+        queued.set(out.queued());
+    });
+    Column(Style{grow: 1, padding: 24, gap: 16, justify: JustifyCenter, background: kit.page}) {
+        Card() {
+            Secondary("Tone");
+            String text;
+            defer String_free(&text);
+            if (failure != null) { String_format(&text, "%s", failure); }
+            else { String_format(&text, "%d frames queued", queued.get()); }
+            TextWith(Style{font_size: 24, font_weight: 700, color: kit.ink}, text.data);
+            Button(playing.get() ? "Stop" : "Play") {
+                if (!opened) return;
+                if (playing.get()) { mixer.stop_all(); out.clear(); }
+                else { mixer.play(&tone, AudioPlay{loop: true}); }
+                playing.set(!playing.get());
+            }
+        }
+    }
+}
+
+void ui_app_start(int which) {
+    kit_follow_system();
+    ui_mount() { Demo(); }
+}
+
+void ui_app_stop() {}
