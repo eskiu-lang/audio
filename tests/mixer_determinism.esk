@@ -1,0 +1,140 @@
+// The mix depends only on the calls made and the frames rendered: the same call log gives
+// the same bytes, run twice or rendered in blocks of 1, 7 or 4096 frames, with the timers on
+// the rendered frames or on a 60 fps video clock (Mixer_advance).
+import <io>;
+import <mem>;
+import <libc>;
+import <audio/wav>;
+import <audio/mixer>;
+
+int fails = 0;
+
+void check(string what, bool ok) {
+    if (!ok) {
+        printf("FAIL %s\n", what);
+        fails++;
+    }
+}
+
+// A sine stream that ends after left frames, standing in for a sequencer.
+struct Sine {
+    double phase;
+    double step;
+    float amp;
+    int64 left;
+    int64 render(*float out, int64 frames) {
+        int64 n = frames < self.left ? frames : self.left;
+        for (i in 0..n) {
+            float v = (float)sin(self.phase) * self.amp;
+            out[i * 2] = v;
+            out[i * 2 + 1] = v * 0.5;
+            self.phase = self.phase + self.step;
+        }
+        self.left -= n;
+        return n;
+    }
+    bool done() {
+        return self.left <= 0;
+    }
+}
+
+const int VIDEO_FRAMES = 90;
+const int PER_FRAME = 800;
+const int TOTAL = 72000;
+
+Sound tone(uint64 frames, int rate, double hz, float amp) {
+    Sound s = sound_new(frames, 1, rate);
+    for (i in 0..frames) s.data[i] = (float)sin(6.283185307179586 * hz * (double)i / (double)rate) * amp;
+    return s;
+}
+
+Sound song;
+Sound fanfare;
+Sound cry;
+Sound wind;
+
+void render_blocks(*Mixer m, *float dst, *int at, int frames, int block) {
+    while (frames > 0) {
+        int n = frames < block ? frames : block;
+        m.render(&dst[*at * 2], n);
+        *at = *at + n;
+        frames -= n;
+    }
+}
+
+// The call log: BGM from a stream, a crossfade to a looping song, a reversed and sped-up cry,
+// a fanfare that pauses the song, a background sound, a bus fade, mono, and a fade out.
+void run_log(*float dst, int block, bool manual) {
+    Mixer m = mixer_new(48000);
+    m.set_manual_clock(manual);
+    m.set_bus_volume(AUDIO_BUS_SFX, 0.8);
+    Sine seq = Sine{step: 6.283185307179586 * 220.0 / 48000.0, amp: 0.4, left: 40000};
+    int at = 0;
+    for (f in 0..VIDEO_FRAMES) {
+        if (f == 0) m.use_bgm(m.play_source(&seq, AudioPlay{bus: AUDIO_BUS_MUSIC}), 0);
+        if (f == 5) m.use_bgs(m.play(&wind, AudioPlay{loop: true, bus: AUDIO_BUS_SFX, volume: 0.3, pan: 0.4}));
+        if (f == 12) m.use_bgm(m.play(&song, AudioPlay{loop: true, balance: true, bus: AUDIO_BUS_MUSIC}), 250);
+        if (f == 20) m.play(&cry, AudioPlay{pitch: 1.37, reverse: true, pan: -0.3, bus: AUDIO_BUS_SFX});
+        if (f == 30) m.use_me(m.play(&fanfare, AudioPlay{balance: true, bus: AUDIO_BUS_MUSIC}));
+        if (f == 50) m.fade_bus(AUDIO_BUS_MUSIC, 0.4, 333);
+        if (f == 60) m.set_mono(true);
+        if (f == 70) m.stop_bgm(300);
+        if (f == 75) m.stop_bgs();
+        m.advance(1.0 / 60.0);
+        render_blocks(&m, dst, &at, PER_FRAME, block);
+    }
+    m.free();
+}
+
+bool same(*float a, *float b) {
+    *uint8 x = (*uint8)a;
+    *uint8 y = (*uint8)b;
+    for (i in 0..TOTAL * 2 * 4) {
+        if (x[i] != y[i]) return false;
+    }
+    return true;
+}
+
+double energy(*float a) {
+    double e = 0.0;
+    for (i in 0..TOTAL * 2) e += (double)a[i] * (double)a[i];
+    return e;
+}
+
+int main() {
+    song = tone(48000, 44100, 330.0, 0.5);
+    fanfare = tone(12000, 32000, 523.25, 0.5);
+    cry = tone(9000, 22050, 700.0, 0.6);
+    wind = tone(12345, 48000, 90.0, 0.3);
+    *float ref = alloc<float>(TOTAL * 2);
+    *float got = alloc<float>(TOTAL * 2);
+
+    for (c in 0..2) {
+        bool manual = c == 1;
+        string clock = manual ? "video clock" : "frame clock";
+        run_log(ref, 4096, manual);
+        check("the log makes sound", energy(ref) > 100.0);
+        run_log(got, 4096, manual);
+        if (!same(ref, got)) {
+            printf("FAIL %s: run twice\n", clock);
+            fails++;
+        }
+        int[2] blocks = {1, 7};
+        for (b in 0..2) {
+            run_log(got, blocks[b], manual);
+            if (!same(ref, got)) {
+                printf("FAIL %s: blocks of %d\n", clock, blocks[b]);
+                fails++;
+            }
+        }
+    }
+
+    free(ref);
+    free(got);
+    song.free();
+    fanfare.free();
+    cry.free();
+    wind.free();
+    printf("mixer_determinism: %d failures\n", fails);
+    return fails == 0 ? 0 : 1;
+}

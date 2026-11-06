@@ -1,0 +1,253 @@
+// Buses, fades, crossfades, the fanfare that pauses the music, reverse and speed, mono
+// output and streamed sources.
+import <io>;
+import <mem>;
+import <libc>;
+import <audio/wav>;
+import <audio/mixer>;
+
+int fails = 0;
+
+void check(string what, bool ok) {
+    if (!ok) {
+        printf("FAIL %s\n", what);
+        fails++;
+    }
+}
+
+bool near(float a, float b, float tol) {
+    return fabsf(a - b) <= tol;
+}
+
+// frames frames of value v (a fixed level is easy to read back through gains).
+Sound level(uint64 frames, float v) {
+    Sound s = sound_new(frames, 1, 48000);
+    for (i in 0..frames) s.data[i] = v;
+    return s;
+}
+
+// Frame i holds i / frames, to read positions back.
+Sound ramp(uint64 frames) {
+    Sound s = sound_new(frames, 1, 48000);
+    for (i in 0..frames) s.data[i] = (float)i / (float)frames;
+    return s;
+}
+
+// A stream of left frames at a fixed level; with gap, every other chunk comes back short.
+struct Steady {
+    float l;
+    float r;
+    int64 left;
+    bool gap;
+    int calls;
+    int64 render(*float out, int64 frames) {
+        self.calls++;
+        int64 n = frames < self.left ? frames : self.left;
+        if (self.gap && self.calls % 2 == 0) n = n / 2;
+        for (i in 0..n) {
+            out[i * 2] = self.l;
+            out[i * 2 + 1] = self.r;
+        }
+        self.left -= n;
+        return n;
+    }
+    bool done() {
+        return self.left <= 0;
+    }
+}
+
+int main() {
+    *float out = alloc<float>(96000);
+    defer free(out);
+    Sound one = level(48000, 1.0);
+    defer one.free();
+    AudioPlay flat = AudioPlay{loop: true, balance: true};
+
+    // Fades are linear in gain over their time: 10 ms is 480 frames at 48 kHz.
+    Mixer m = mixer_new(48000);
+    uint32 a = m.play(&one, flat);
+    m.fade_in(a, 10);
+    m.render(out, 960);
+    check("fade in starts silent", out[0] == 0.0);
+    check("fade in is halfway at half its time", near(out[240 * 2], 0.5, 0.0001) && near(out[240 * 2 + 1], 0.5, 0.0001));
+    check("fade in is linear", near(out[120 * 2], 0.25, 0.0001) && near(out[360 * 2], 0.75, 0.0001));
+    check("fade in reaches full at its end", near(out[480 * 2], 1.0, 0.0001) && out[959 * 2] == 1.0);
+    m.fade(a, 0.5, 10);
+    m.render(out, 600);
+    check("a fade to 0.5 takes its time", near(out[240 * 2], 0.75, 0.0001) && near(out[480 * 2], 0.5, 0.0001));
+    check("and stays there", out[599 * 2] == 0.5 && m.fade_level(a) == 0.5);
+    m.fade_out(a, 20);
+    m.render(out, 1000);
+    check("fade out goes down linearly", near(out[480 * 2], 0.25, 0.0001));
+    check("and stops the voice at silence", !m.playing(a) && out[999 * 2] == 0.0 && m.count() == 0);
+    uint32 z = m.play(&one, flat);
+    m.fade_out(z, 0);
+    check("fade out over 0 ms stops at once", !m.playing(z));
+
+    // A crossfade's two gains add up to 1 on every frame.
+    uint32 x = m.play(&one, flat);
+    uint32 y = m.play(&one, flat);
+    m.crossfade(x, y, 10);
+    m.render(out, 600);
+    bool sum = true;
+    for (i in 0..600) {
+        if (!near(out[i * 2], 1.0, 0.00001)) sum = false;
+    }
+    check("crossfade: the sum stays at 1", sum);
+    check("crossfade: the old voice stops, the new one stays", !m.playing(x) && m.playing(y) && m.fade_level(y) == 1.0);
+    m.stop_all();
+
+    // Buses multiply down the chain: master, then music or sfx, then buses inside them.
+    m.set_bus_volume(AUDIO_BUS_MASTER, 0.5);
+    m.set_bus_volume(AUDIO_BUS_MUSIC, 0.5);
+    int voice_bus = m.add_bus(AUDIO_BUS_MUSIC);
+    m.set_bus_volume(voice_bus, 0.5);
+    uint32 mus = m.play(&one, AudioPlay{loop: true, balance: true, bus: AUDIO_BUS_MUSIC});
+    m.render(out, 4);
+    check("music bus inside master", near(out[0], 0.25, 0.000001));
+    m.set_bus(mus, AUDIO_BUS_SFX);
+    m.render(out, 4);
+    check("sfx bus inside master", near(out[0], 0.5, 0.000001));
+    m.set_bus(mus, voice_bus);
+    m.render(out, 4);
+    check("a bus inside music", near(out[0], 0.125, 0.000001) && m.bus_volume(voice_bus) == 0.5);
+    m.set_bus(mus, AUDIO_BUS_MUSIC);
+    m.fade_bus(AUDIO_BUS_MUSIC, 0.0, 10);
+    m.render(out, 600);
+    check("a bus fades like a voice", near(out[240 * 2], 0.125, 0.0001) && out[599 * 2] == 0.0 && m.playing(mus));
+    check("a faded bus keeps its voices", m.bus_volume(AUDIO_BUS_MUSIC) == 0.0);
+    m.stop_all();
+    m.set_bus_volume(AUDIO_BUS_MASTER, 1.0);
+    m.set_bus_volume(AUDIO_BUS_MUSIC, 1.0);
+
+    // The fanfare pauses the music where it is; the music resumes on the frame after.
+    Sound song = ramp(10000);
+    defer song.free();
+    Sound fanfare = level(100, 0.25);
+    defer fanfare.free();
+    uint32 bgm = m.play(&song, AudioPlay{balance: true, bus: AUDIO_BUS_MUSIC});
+    m.use_bgm(bgm, 0);
+    m.render(out, 50);
+    check("the music plays", near(out[49 * 2], 49.0 / 10000.0, 0.000001) && m.bgm() == bgm);
+    uint32 me = m.play(&fanfare, AudioPlay{balance: true, bus: AUDIO_BUS_MUSIC});
+    m.use_me(me);
+    m.render(out, 60);
+    check("the fanfare plays alone", out[0] == 0.25 && out[59 * 2] == 0.25 && m.paused(bgm) && m.me() == me);
+    m.render(out, 7);
+    m.render(out, 33);
+    check("up to its last frame", out[32 * 2] == 0.25);
+    check("then the music resumes", !m.paused(bgm) && m.me() == 0);
+    m.render(out, 2);
+    check("where it paused", near(out[0], 50.0 / 10000.0, 0.000001) && near(out[2], 51.0 / 10000.0, 0.000001));
+    uint32 me2 = m.play(&fanfare, AudioPlay{balance: true, bus: AUDIO_BUS_MUSIC});
+    m.use_me(me2);
+    m.render(out, 10);
+    m.stop(me2);
+    m.render(out, 1);
+    check("a stopped fanfare resumes the music", near(out[0], 52.0 / 10000.0, 0.000001));
+    uint32 me3 = m.play(&fanfare, AudioPlay{balance: true, bus: AUDIO_BUS_MUSIC});
+    m.use_me(me3);
+    uint32 next = m.play(&one, AudioPlay{loop: true, balance: true, bus: AUDIO_BUS_MUSIC});
+    m.use_bgm(next, 0);
+    check("music that starts during a fanfare waits", m.paused(next) && !m.playing(bgm) && m.bgm() == next);
+    m.render(out, 101);
+    check("and starts after it", out[99 * 2] == 0.25 && out[100 * 2] == 1.0);
+    m.use_bgm(next, 0);
+    check("the same music again keeps playing", m.playing(next) && m.fade_level(next) == 1.0);
+    m.stop_bgm(10);
+    m.render(out, 600);
+    check("stop_bgm fades out", near(out[240 * 2], 0.5, 0.0001) && !m.playing(next) && m.bgm() == 0);
+    uint32 bgs = m.play(&one, AudioPlay{loop: true, balance: true, bus: AUDIO_BUS_SFX, volume: 0.5});
+    m.use_bgs(bgs);
+    uint32 bgs2 = m.play(&one, AudioPlay{loop: true, balance: true, bus: AUDIO_BUS_SFX, volume: 0.25});
+    m.use_bgs(bgs2);
+    m.render(out, 4);
+    check("one background sound at a time", !m.playing(bgs) && m.bgs() == bgs2 && out[0] == 0.25);
+    m.stop_bgs();
+    check("stop_bgs", m.bgs() == 0 && m.count() == 0);
+
+    // Reverse and speed (pitch), as cries use them.
+    Sound r100 = ramp(100);
+    defer r100.free();
+    m.play(&r100, AudioPlay{reverse: true, balance: true});
+    m.render(out, 101);
+    check("reverse plays from the end", near(out[0], 0.99, 0.000001) && near(out[1 * 2], 0.98, 0.000001) && near(out[99 * 2], 0.0, 0.000001));
+    check("and ends at the start", out[100 * 2] == 0.0 && m.count() == 0);
+    m.play(&r100, AudioPlay{pitch: 2.0, balance: true});
+    m.render(out, 51);
+    check("speed 2 skips every other frame", near(out[10 * 2], 0.2, 0.000001) && near(out[49 * 2], 0.98, 0.000001));
+    check("and lasts half as long", out[50 * 2] == 0.0 && m.count() == 0);
+    m.play(&r100, AudioPlay{pitch: 2.0, reverse: true, balance: true});
+    m.render(out, 51);
+    check("reverse at speed 2", near(out[10 * 2], 0.79, 0.000001) && out[50 * 2] == 0.0);
+    m.play(&r100, AudioPlay{pitch: 0.5, reverse: true, balance: true});
+    m.render(out, 3);
+    check("reverse at speed 0.5 interpolates", near(out[1 * 2], 0.985, 0.000001));
+    m.stop_all();
+
+    // Mono: both sides play the average of the two channels.
+    Sound dc = sound_new(100, 2, 48000);
+    defer dc.free();
+    for (i in 0..100) {
+        dc.data[i * 2] = 0.5;
+        dc.data[i * 2 + 1] = -0.25;
+    }
+    m.play(&dc, AudioPlay{loop: true, balance: true});
+    m.set_mono(true);
+    m.render(out, 4);
+    check("mono downmix", near(out[0], 0.125, 0.000001) && near(out[1], 0.125, 0.000001));
+    m.set_mono(false);
+    m.render(out, 4);
+    check("stereo again", near(out[0], 0.5, 0.000001) && near(out[1], -0.25, 0.000001));
+    m.stop_all();
+
+    // Streams: a source renders itself, in chunks whatever the render size.
+    Steady s = Steady{l: 0.5, r: -0.5, left: 1000};
+    uint32 sid = m.play_source(&s, AudioPlay{volume: 0.5});
+    m.render(out, 999);
+    check("a source at its volume, balanced", near(out[0], 0.25, 0.000001) && near(out[1], -0.25, 0.000001));
+    check("its position is the time it played", m.position(sid) == 999.0 / 48000.0);
+    m.render(out, 2);
+    check("a source plays until done", out[0] == 0.25 && out[2] == 0.0 && !m.playing(sid) && m.count() == 0);
+    Steady g = Steady{l: 1.0, r: 1.0, left: 100000, gap: true};
+    uint32 gid = m.play_source(&g, AudioPlay{pan: -1.0});
+    m.render(out, 1024);
+    check("a source pans as a balance", out[0] == 1.0 && out[1] == 0.0);
+    check("a short chunk plays silence for the rest", out[511 * 2] == 1.0 && out[512 * 2] == 1.0 && out[767 * 2] == 1.0 && out[768 * 2] == 0.0 && out[1023 * 2] == 0.0);
+    m.pause(gid);
+    m.render(out, 100);
+    check("a paused source is not asked for more", g.calls == 2 && out[0] == 0.0);
+    m.stop(gid);
+    check("a stopped source", !m.playing(gid) && m.count() == 0);
+    m.free();
+
+    // The manual clock: timers move only in advance, a render keeps the gains it left.
+    Mixer v = mixer_new(48000);
+    v.set_manual_clock(true);
+    uint32 w = v.play(&one, flat);
+    v.fade_in(w, 100);
+    v.advance(1.0 / 60.0);
+    v.render(out, 800);
+    check("manual clock: a block at one gain", near(out[0], 1.0 / 6.0, 0.00001) && out[799 * 2] == out[0]);
+    v.render(out, 800);
+    check("render alone does not move the fade", near(out[0], 1.0 / 6.0, 0.00001));
+    for (i in 0..5) v.advance(1.0 / 60.0);
+    v.render(out, 1);
+    check("advance does", out[0] == 1.0);
+    uint32 vb = v.play(&song, AudioPlay{balance: true, bus: AUDIO_BUS_MUSIC});
+    v.use_bgm(vb, 0);
+    uint32 vm = v.play(&fanfare, AudioPlay{balance: true, bus: AUDIO_BUS_MUSIC});
+    v.use_me(vm);
+    v.stop(w);
+    v.render(out, 150);
+    check("manual clock: the music waits for an advance after the fanfare", out[99 * 2] == 0.25 && out[100 * 2] == 0.0 && v.paused(vb));
+    v.advance(1.0 / 60.0);
+    v.render(out, 1);
+    check("and resumes at it", out[0] == 0.0 && !v.paused(vb));
+    v.render(out, 1);
+    check("from where it paused", near(out[0], 1.0 / 10000.0, 0.000001));
+    v.free();
+
+    printf("mixer_fades: %d failures\n", fails);
+    return fails == 0 ? 0 : 1;
+}
