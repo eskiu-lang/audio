@@ -1,4 +1,4 @@
-// mixer.esk: mixes playing sounds into a stereo float stream.
+// mixer.esk: mixes playing sounds and streams into a stereo float stream.
 //
 //     Mixer m = mixer_new(48000);
 //     uint32 id = m.play(&jump, AudioPlay{volume: 0.8, pan: -0.3});
@@ -8,17 +8,49 @@
 // interpolation), with volume, pan (-1 left to 1 right, equal power) and
 // looping. A mono sound plays on both sides; a sound with more than two
 // channels plays its first two. The sounds must live while they play.
+//
+// A voice can also play an AudioSource, a stream that renders itself (a
+// sequencer, a decoder), and every voice plays on a bus: master, music,
+// sfx, or one added with Mixer_add_bus. Voices and buses fade over a time
+// in milliseconds, linearly in gain. Mixer_use_bgm, Mixer_use_me and
+// Mixer_use_bgs give voices the roles of a game's background music, a
+// fanfare that pauses that music while it plays, and background sound.
+//
+// The output depends only on the calls made and the frame counts rendered,
+// never on wall time: rendering 4096 frames, or the same 4096 in blocks of
+// 1 or 7, gives the same samples (Mixer_advance runs the timers on a video
+// clock instead).
 
 import <mem>;
 import <list>;
 import <libc>;
 import <audio/wav>;
 
+// A stream the mixer plays: render writes up to frames stereo frames
+// (2 * frames floats, interleaved, at the mixer's rate) into out and
+// returns how many it wrote; done says no more will come. A source that
+// writes fewer frames and is not done plays silence for the rest.
+interface AudioSource {
+    int64 render(*float out, int64 frames);
+    bool done();
+}
+
+const int AUDIO_BUS_MASTER = 0;
+const int AUDIO_BUS_MUSIC = 1;
+const int AUDIO_BUS_SFX = 2;
+
+// Frames a source renders at a time, whatever the size of the mix.
+const int64 _MIX_CHUNK = 512;
+
 struct AudioPlay {
     float volume = 1.0;
     float pan;
     float pitch = 1.0;
     bool loop;
+    bool reverse;
+    // Pan as stereo balance: centered, both channels play at full volume.
+    bool balance;
+    int bus;
 }
 
 struct _Voice {
@@ -35,6 +67,29 @@ struct _Voice {
     *Sound next;
     bool next_loop;
     bool paused;
+    bool reverse;
+    bool balance;
+    int bus;
+    double env;
+    double env_target;
+    double env_speed;
+    bool env_stop;
+    bool ended;
+    bool is_src;
+    AudioSource src;
+    *float buf;
+    int64 buf_len;
+    int64 buf_pos;
+    bool src_done;
+    uint64 played;
+}
+
+struct _Bus {
+    int parent;
+    double gain;
+    double target;
+    double speed;
+    float eff;
 }
 
 struct Mixer {
@@ -42,6 +97,12 @@ struct Mixer {
     float volume;
     List<_Voice> voices;
     uint32 next_id;
+    List<_Bus> buses;
+    bool mono;
+    bool manual_clock;
+    uint32 bgm;
+    uint32 me;
+    uint32 bgs;
 }
 
 Mixer mixer_new(int rate) {
@@ -49,38 +110,74 @@ Mixer mixer_new(int rate) {
     m.rate = rate;
     m.volume = 1.0;
     m.next_id = 1;
+    List_push(&m.buses, _Bus{parent: -1, gain: 1.0, target: 1.0});
+    List_push(&m.buses, _Bus{parent: AUDIO_BUS_MASTER, gain: 1.0, target: 1.0});
+    List_push(&m.buses, _Bus{parent: AUDIO_BUS_MASTER, gain: 1.0, target: 1.0});
     return m;
 }
 
 void _voice_gains(_Voice* v) {
     float pan = v.pan < -1.0 ? -1.0 : (v.pan > 1.0 ? 1.0 : v.pan);
+    if (v.balance) {
+        v.left = v.volume * (pan > 0.0 ? 1.0 - pan : 1.0);
+        v.right = v.volume * (pan < 0.0 ? 1.0 + pan : 1.0);
+        return;
+    }
     double angle = ((double)pan + 1.0) * 0.7853981633974483;
     v.left = v.volume * (float)cos(angle);
     v.right = v.volume * (float)sin(angle);
 }
 
-// Starts sound and returns its voice id. AudioPlay{} plays at full volume,
-// centered, at the sound's own pitch, once.
-uint32 Mixer_play(*Mixer self, *Sound sound, AudioPlay opt) {
-    _Voice v;
+int _mixer_bus_of(*Mixer self, int bus) {
+    return bus >= 0 && bus < self.buses.size ? bus : 0;
+}
+
+uint32 _mixer_add(*Mixer self, _Voice v, AudioPlay opt) {
     v.id = self.next_id;
     self.next_id++;
     if (self.next_id == 0) self.next_id = 1;
-    v.sound = sound;
-    float pitch = opt.pitch > 0.0 ? opt.pitch : 1.0;
-    v.pitch = pitch;
-    v.step = (double)pitch * (double)sound.rate / (double)self.rate;
     v.volume = opt.volume;
     v.pan = opt.pan;
-    v.loop = opt.loop;
+    v.balance = opt.balance;
+    v.bus = _mixer_bus_of(self, opt.bus);
+    v.env = 1.0;
+    v.env_target = 1.0;
     _voice_gains(&v);
     List_push(&self.voices, v);
     return v.id;
 }
 
+// Starts sound and returns its voice id. AudioPlay{} plays at full volume,
+// centered, at the sound's own pitch, once, on the master bus. pitch is
+// also the speed (a cry at 1.5 plays faster and higher); reverse plays the
+// sound from its end to its start.
+uint32 Mixer_play(*Mixer self, *Sound sound, AudioPlay opt) {
+    _Voice v;
+    v.sound = sound;
+    float pitch = opt.pitch > 0.0 ? opt.pitch : 1.0;
+    v.pitch = pitch;
+    v.step = (double)pitch * (double)sound.rate / (double)self.rate;
+    v.loop = opt.loop;
+    v.reverse = opt.reverse;
+    return _mixer_add(self, v, opt);
+}
+
+// Starts a stream and returns its voice id. The source must live while it
+// plays; it renders at the mixer's rate, so pitch, loop and reverse do not
+// apply, and its pan is a stereo balance.
+uint32 Mixer_play_source(*Mixer self, AudioSource src, AudioPlay opt) {
+    _Voice v;
+    v.is_src = true;
+    v.src = src;
+    v.buf = alloc<float>(_MIX_CHUNK * 2);
+    opt.balance = true;
+    return _mixer_add(self, v, opt);
+}
+
 _Voice* _mixer_voice(*Mixer self, uint32 id) {
     for (i in 0..self.voices.size) {
-        if (self.voices.data[i].id == id) return &self.voices.data[i];
+        _Voice* v = &self.voices.data[i];
+        if (v.id == id && !v.ended) return v;
     }
     return null;
 }
@@ -89,17 +186,27 @@ bool Mixer_playing(*Mixer self, uint32 id) {
     return _mixer_voice(self, id) != null;
 }
 
+// Removes the voice at k, keeping the others in the order they started:
+// the mix adds voices in that order, so it never depends on when one ends.
+void _mixer_remove(*Mixer self, int k) {
+    if (self.voices.data[k].buf != null) free(self.voices.data[k].buf);
+    for (i in k..self.voices.size - 1) self.voices.data[i] = self.voices.data[i + 1];
+    self.voices.size--;
+}
+
 void Mixer_stop(*Mixer self, uint32 id) {
     for (i in 0..self.voices.size) {
         if (self.voices.data[i].id == id) {
-            self.voices.data[i] = self.voices.data[self.voices.size - 1];
-            self.voices.size--;
+            _mixer_remove(self, i);
             return;
         }
     }
 }
 
 void Mixer_stop_all(*Mixer self) {
+    for (i in 0..self.voices.size) {
+        if (self.voices.data[i].buf != null) free(self.voices.data[i].buf);
+    }
     self.voices.size = 0;
 }
 
@@ -119,7 +226,7 @@ void Mixer_set_pan(*Mixer self, uint32 id, float pan) {
 
 void Mixer_set_pitch(*Mixer self, uint32 id, float pitch) {
     _Voice* v = _mixer_voice(self, id);
-    if (v == null || pitch <= 0.0) return;
+    if (v == null || v.is_src || pitch <= 0.0) return;
     v.pitch = pitch;
     v.step = (double)pitch * (double)v.sound.rate / (double)self.rate;
 }
@@ -129,7 +236,7 @@ void Mixer_set_pitch(*Mixer self, uint32 id, float pitch) {
 // follows it.
 void Mixer_then(*Mixer self, uint32 id, *Sound sound, bool loop) {
     _Voice* v = _mixer_voice(self, id);
-    if (v == null) return;
+    if (v == null || v.is_src) return;
     v.next = sound;
     v.next_loop = loop;
 }
@@ -140,17 +247,19 @@ void Mixer_then(*Mixer self, uint32 id, *Sound sound, bool loop) {
     return v == null ? null : v.sound;
 }
 
-// Where the voice is in its current sound, in seconds, or -1 when it is not playing.
+// Where the voice is in its current sound, in seconds, or -1 when it is not playing. A
+// stream's position is the time it has played.
 double Mixer_position(*Mixer self, uint32 id) {
     _Voice* v = _mixer_voice(self, id);
     if (v == null) return -1.0;
+    if (v.is_src) return (double)v.played / (double)self.rate;
     return v.pos / (double)v.sound.rate;
 }
 
-// Moves the voice to `seconds` into its current sound.
+// Moves the voice to `seconds` into its current sound (not a stream).
 void Mixer_seek(*Mixer self, uint32 id, double seconds) {
     _Voice* v = _mixer_voice(self, id);
-    if (v == null) return;
+    if (v == null || v.is_src) return;
     double at = seconds * (double)v.sound.rate;
     v.pos = at < 0 ? 0 : (at >= (double)v.sound.frames ? (double)v.sound.frames - 1 : at);
 }
@@ -175,62 +284,321 @@ int Mixer_count(*Mixer self) {
     return self.voices.size;
 }
 
+// A fade moves a gain linearly from where it is to a target over ms
+// milliseconds (at once for 0), at a fixed speed in gain per second.
+void _env_to(*double gain, *double target, *double speed, double to, int ms) {
+    *target = to;
+    if (ms <= 0) {
+        *gain = to;
+        *speed = 0.0;
+        return;
+    }
+    double d = fabs(to - *gain);
+    *speed = (d > 0.001 ? d : 0.001) / ((double)ms / 1000.0);
+}
+
+void _env_step(*double gain, double target, double speed, double dt) {
+    if (*gain == target) return;
+    double d = speed * dt;
+    if (*gain < target) *gain = *gain + d < target ? *gain + d : target;
+    else *gain = *gain - d > target ? *gain - d : target;
+}
+
+// Moves the voice's fade gain (1 when it starts, a factor on its volume) to gain over ms.
+void Mixer_fade(*Mixer self, uint32 id, float gain, int ms) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    v.env_stop = false;
+    _env_to(&v.env, &v.env_target, &v.env_speed, (double)gain, ms);
+}
+
+// Fades the voice from silence to full over ms.
+void Mixer_fade_in(*Mixer self, uint32 id, int ms) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    v.env = ms > 0 ? 0.0 : 1.0;
+    v.env_stop = false;
+    _env_to(&v.env, &v.env_target, &v.env_speed, 1.0, ms);
+}
+
+// Fades the voice to silence over ms and stops it there (at once for 0).
+void Mixer_fade_out(*Mixer self, uint32 id, int ms) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    if (ms <= 0) {
+        Mixer_stop(self, id);
+        return;
+    }
+    v.env_stop = true;
+    _env_to(&v.env, &v.env_target, &v.env_speed, 0.0, ms);
+}
+
+// `from` fades out and stops while `to` fades in, both over ms: their gains add up to 1.
+void Mixer_crossfade(*Mixer self, uint32 from, uint32 to, int ms) {
+    Mixer_fade_in(self, to, ms);
+    Mixer_fade_out(self, from, ms);
+}
+
+// The voice's fade gain now, or -1 when it is not playing.
+double Mixer_fade_level(*Mixer self, uint32 id) {
+    _Voice* v = _mixer_voice(self, id);
+    return v == null ? -1.0 : v.env;
+}
+
+// A new bus inside parent (AUDIO_BUS_MASTER for a top-level category); returns its index.
+// A voice's gain is its volume times its fade times the volume of its bus and of each bus
+// that holds it.
+int Mixer_add_bus(*Mixer self, int parent) {
+    List_push(&self.buses, _Bus{parent: _mixer_bus_of(self, parent), gain: 1.0, target: 1.0});
+    return self.buses.size - 1;
+}
+
+void Mixer_set_bus_volume(*Mixer self, int bus, float volume) {
+    if (bus < 0 || bus >= self.buses.size) return;
+    _Bus* b = &self.buses.data[bus];
+    _env_to(&b.gain, &b.target, &b.speed, (double)volume, 0);
+}
+
+// Moves the bus's volume to volume over ms, like a voice's fade.
+void Mixer_fade_bus(*Mixer self, int bus, float volume, int ms) {
+    if (bus < 0 || bus >= self.buses.size) return;
+    _Bus* b = &self.buses.data[bus];
+    _env_to(&b.gain, &b.target, &b.speed, (double)volume, ms);
+}
+
+float Mixer_bus_volume(*Mixer self, int bus) {
+    if (bus < 0 || bus >= self.buses.size) return 0.0;
+    return (float)self.buses.data[bus].gain;
+}
+
+// Moves a playing voice to another bus.
+void Mixer_set_bus(*Mixer self, uint32 id, int bus) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v != null) v.bus = _mixer_bus_of(self, bus);
+}
+
+// Mono output: each frame plays the average of its two channels on both sides.
+void Mixer_set_mono(*Mixer self, bool mono) {
+    self.mono = mono;
+}
+
+// Makes the voice the background music. The music before it fades out and stops while this
+// one fades in, over fade_ms (with 0 the old one stops and this one plays at once); while a
+// fanfare plays, the new music waits paused. Given the voice that is already the music, it
+// only fades it back to full over fade_ms.
+void Mixer_use_bgm(*Mixer self, uint32 id, int fade_ms) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null) return;
+    if (id == self.bgm) {
+        Mixer_fade(self, id, 1.0, fade_ms);
+        return;
+    }
+    Mixer_fade_in(self, id, fade_ms);
+    if (Mixer_playing(self, self.me)) v.paused = true;
+    uint32 old = self.bgm;
+    self.bgm = id;
+    if (old != 0) Mixer_fade_out(self, old, fade_ms);
+}
+
+// Fades the background music out over fade_ms and stops it (at once for 0).
+void Mixer_stop_bgm(*Mixer self, int fade_ms) {
+    uint32 old = self.bgm;
+    self.bgm = 0;
+    if (old != 0) Mixer_fade_out(self, old, fade_ms);
+}
+
+// Makes the voice the fanfare (ME): the background music pauses where it is and resumes on
+// the frame after the fanfare ends or stops. A new fanfare stops the one before.
+void Mixer_use_me(*Mixer self, uint32 id) {
+    if (_mixer_voice(self, id) == null) return;
+    if (self.me != 0 && self.me != id) Mixer_stop(self, self.me);
+    self.me = id;
+    Mixer_pause(self, self.bgm);
+}
+
+// Makes the voice the background sound (BGS), stopping the one before.
+void Mixer_use_bgs(*Mixer self, uint32 id) {
+    if (_mixer_voice(self, id) == null) return;
+    if (self.bgs != 0 && self.bgs != id) Mixer_stop(self, self.bgs);
+    self.bgs = id;
+}
+
+void Mixer_stop_bgs(*Mixer self) {
+    if (self.bgs != 0) Mixer_stop(self, self.bgs);
+    self.bgs = 0;
+}
+
+// The voice in each role, or 0 when none plays.
+uint32 Mixer_bgm(*Mixer self) {
+    return Mixer_playing(self, self.bgm) ? self.bgm : 0;
+}
+
+uint32 Mixer_me(*Mixer self) {
+    return Mixer_playing(self, self.me) ? self.me : 0;
+}
+
+uint32 Mixer_bgs(*Mixer self) {
+    return Mixer_playing(self, self.bgs) ? self.bgs : 0;
+}
+
+// Fades and the fanfare's end are timers. By default they run on the
+// frames rendered, sample by sample. With the manual clock they run only
+// in Mixer_advance, and a render mixes at the gains the last advance left:
+// a video recorder calls m.advance(dt) and then m.render(out, frames) for
+// each video frame.
+void Mixer_set_manual_clock(*Mixer self, bool manual) {
+    self.manual_clock = manual;
+}
+
+// After a fanfare ends or stops, the music it paused resumes.
+void _mixer_events(*Mixer self) {
+    if (self.me == 0 || Mixer_playing(self, self.me)) return;
+    self.me = 0;
+    Mixer_resume(self, self.bgm);
+}
+
+// Moves every fade by dt seconds; a voice faded out to silence ends.
+void _mixer_tick(*Mixer self, double dt) {
+    for (b in 0..self.buses.size) {
+        _Bus* bus = &self.buses.data[b];
+        _env_step(&bus.gain, bus.target, bus.speed, dt);
+    }
+    for (k in 0..self.voices.size) {
+        _Voice* v = &self.voices.data[k];
+        if (v.ended) continue;
+        _env_step(&v.env, v.env_target, v.env_speed, dt);
+        if (v.env_stop && v.env <= 0.0) v.ended = true;
+    }
+}
+
+void _mixer_sweep(*Mixer self) {
+    int k = 0;
+    while (k < self.voices.size) {
+        if (self.voices.data[k].ended) _mixer_remove(self, k);
+        else k++;
+    }
+}
+
+// With the manual clock, runs the timers dt seconds of the caller's clock forward in one
+// step (a video frame). Without it the rendered frames are the clock and this does nothing.
+void Mixer_advance(*Mixer self, double dt) {
+    if (!self.manual_clock) return;
+    _mixer_tick(self, dt);
+    _mixer_sweep(self);
+    _mixer_events(self);
+}
+
 float _sample(*Sound s, uint64 frame, int ch) {
     int c = ch < s.channels ? ch : s.channels - 1;
     return s.data[frame * (uint64)s.channels + (uint64)c];
 }
 
-// Writes frames stereo frames (2 * frames floats) of the mix into out and
-// advances every voice; voices that end are removed.
-void Mixer_render(*Mixer self, *float out, int frames) {
-    for (i in 0..frames * 2) out[i] = 0.0;
-    int k = 0;
-    while (k < self.voices.size) {
-        _Voice* v = &self.voices.data[k];
-        if (v.paused) { k++; continue; }
-        *Sound s = v.sound;
-        bool done = s.frames == 0;
-        for (f in 0..frames) {
-            if (done) break;
-            s = v.sound;
-            uint64 i0 = (uint64)v.pos;
-            double t = v.pos - (double)i0;
-            uint64 i1 = i0 + 1;
-            if (i1 >= s.frames) i1 = v.loop ? 0 : i0;
-            float l0 = _sample(s, i0, 0);
-            float l1 = _sample(s, i1, 0);
-            float r0 = _sample(s, i0, 1);
-            float r1 = _sample(s, i1, 1);
-            float l = l0 + (l1 - l0) * (float)t;
-            float r = r0 + (r1 - r0) * (float)t;
-            out[f * 2] += l * v.left;
-            out[f * 2 + 1] += r * v.right;
-            v.pos = v.pos + v.step;
-            if (v.pos >= (double)s.frames) {
-                if (v.loop) v.pos = v.pos - (double)s.frames * (double)(uint64)(v.pos / (double)s.frames);
-                else if (v.next != null && v.next.frames > 0) {
-                    // What is left over carries into the next sound, at its rate.
-                    double over = (v.pos - (double)s.frames) / (double)s.rate * (double)v.next.rate;
-                    v.sound = v.next;
-                    v.loop = v.next_loop;
-                    v.next = null;
-                    v.step = (double)v.pitch * (double)v.sound.rate / (double)self.rate;
-                    v.pos = over < (double)v.sound.frames ? over : 0;
-                }
-                else done = true;
-            }
+// One frame of a sound voice into l and r (before its gains), then a step forward; false
+// when there is nothing to play.
+bool _voice_sound_frame(*Mixer self, _Voice* v, *float l, *float r) {
+    *Sound s = v.sound;
+    if (s.frames == 0) return false;
+    uint64 i0 = (uint64)v.pos;
+    double t = v.pos - (double)i0;
+    uint64 i1 = i0 + 1;
+    if (i1 >= s.frames) i1 = v.loop ? 0 : i0;
+    if (v.reverse) {
+        i0 = s.frames - 1 - i0;
+        i1 = s.frames - 1 - i1;
+    }
+    float l0 = _sample(s, i0, 0);
+    float l1 = _sample(s, i1, 0);
+    float r0 = _sample(s, i0, 1);
+    float r1 = _sample(s, i1, 1);
+    *l = l0 + (l1 - l0) * (float)t;
+    *r = r0 + (r1 - r0) * (float)t;
+    v.pos = v.pos + v.step;
+    if (v.pos >= (double)s.frames) {
+        if (v.loop) v.pos = v.pos - (double)s.frames * (double)(uint64)(v.pos / (double)s.frames);
+        else if (v.next != null && v.next.frames > 0) {
+            // What is left over carries into the next sound, at its rate.
+            double over = (v.pos - (double)s.frames) / (double)s.rate * (double)v.next.rate;
+            v.sound = v.next;
+            v.loop = v.next_loop;
+            v.next = null;
+            v.step = (double)v.pitch * (double)v.sound.rate / (double)self.rate;
+            v.pos = over < (double)v.sound.frames ? over : 0;
         }
-        if (done) {
-            self.voices.data[k] = self.voices.data[self.voices.size - 1];
-            self.voices.size--;
-        } else k++;
+        else v.ended = true;
     }
-    for (i in 0..frames * 2) {
-        float x = out[i] * self.volume;
-        out[i] = x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
+    return true;
+}
+
+// One frame of a stream. The source is asked for _MIX_CHUNK frames at a time, so the calls
+// it sees do not depend on how the mix is split into renders.
+bool _voice_source_frame(_Voice* v, *float l, *float r) {
+    if (v.buf_pos >= v.buf_len) {
+        if (v.src_done) return false;
+        int64 n = v.src.render(v.buf, _MIX_CHUNK);
+        if (n < 0) n = 0;
+        if (n > _MIX_CHUNK) n = _MIX_CHUNK;
+        v.src_done = v.src.done();
+        if (!v.src_done) {
+            for (i in n * 2.._MIX_CHUNK * 2) v.buf[i] = 0.0;
+            n = _MIX_CHUNK;
+        }
+        v.buf_len = n;
+        v.buf_pos = 0;
+        if (n == 0) return false;
     }
+    *l = v.buf[v.buf_pos * 2];
+    *r = v.buf[v.buf_pos * 2 + 1];
+    v.buf_pos++;
+    if (v.src_done && v.buf_pos >= v.buf_len) v.ended = true;
+    return true;
+}
+
+// Writes frames stereo frames (2 * frames floats) of the mix into out and
+// advances every voice; voices that end are removed. Voices add in the
+// order they started.
+void Mixer_render(*Mixer self, *float out, int frames) {
+    double dt = 1.0 / (double)self.rate;
+    for (f in 0..frames) {
+        if (!self.manual_clock) _mixer_events(self);
+        for (b in 0..self.buses.size) {
+            _Bus* bus = &self.buses.data[b];
+            bus.eff = (float)bus.gain;
+            if (bus.parent >= 0 && bus.parent < b) bus.eff = bus.eff * self.buses.data[bus.parent].eff;
+        }
+        float sl = 0.0;
+        float sr = 0.0;
+        for (k in 0..self.voices.size) {
+            _Voice* v = &self.voices.data[k];
+            if (v.paused || v.ended) continue;
+            float l = 0.0;
+            float r = 0.0;
+            bool got = v.is_src ? _voice_source_frame(v, &l, &r) : _voice_sound_frame(self, v, &l, &r);
+            if (!got) {
+                v.ended = true;
+                continue;
+            }
+            v.played++;
+            float g = (float)v.env;
+            if (self.buses.size > 0) g = g * self.buses.data[v.bus].eff;
+            sl += l * v.left * g;
+            sr += r * v.right * g;
+        }
+        if (self.mono) {
+            sl = (sl + sr) * 0.5;
+            sr = sl;
+        }
+        float x = sl * self.volume;
+        float y = sr * self.volume;
+        out[f * 2] = x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
+        out[f * 2 + 1] = y > 1.0 ? 1.0 : (y < -1.0 ? -1.0 : y);
+        if (!self.manual_clock) _mixer_tick(self, dt);
+    }
+    _mixer_sweep(self);
+    if (!self.manual_clock) _mixer_events(self);
 }
 
 void Mixer_free(*Mixer self) {
+    Mixer_stop_all(self);
     List_free(&self.voices);
+    List_free(&self.buses);
 }
