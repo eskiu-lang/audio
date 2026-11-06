@@ -275,12 +275,12 @@ Result<Sound, string> wav_decode(*uint8 d, uint64 len) {
     return Ok<Sound, string>(s);
 }
 
-void _wav_put16(*uint8 p, uint32 v) {
+void _wav_le16(*uint8 p, uint32 v) {
     p[0] = (uint8)(v & 255);
     p[1] = (uint8)((v >> 8) & 255);
 }
 
-void _wav_put32(*uint8 p, uint32 v) {
+void _wav_le32(*uint8 p, uint32 v) {
     for (k in 0..4) p[k] = (uint8)((v >> (k * 8)) & 255);
 }
 
@@ -294,17 +294,17 @@ Result<int, string> wav_save(string path, *Sound s, int bits) {
     *uint8 out = alloc<uint8>((int64)(44 + data_bytes));
     defer free(out);
     memcpy(out, "RIFF", 4);
-    _wav_put32(out + 4, (uint32)(36 + data_bytes));
+    _wav_le32(out + 4, (uint32)(36 + data_bytes));
     memcpy(out + 8, "WAVEfmt ", 8);
-    _wav_put32(out + 16, 16);
-    _wav_put16(out + 20, bits == 32 ? (uint32)3 : (uint32)1);
-    _wav_put16(out + 22, (uint32)s.channels);
-    _wav_put32(out + 24, (uint32)s.rate);
-    _wav_put32(out + 28, (uint32)(s.rate * s.channels * bits / 8));
-    _wav_put16(out + 32, (uint32)(s.channels * bits / 8));
-    _wav_put16(out + 34, (uint32)bits);
+    _wav_le32(out + 16, 16);
+    _wav_le16(out + 20, bits == 32 ? (uint32)3 : (uint32)1);
+    _wav_le16(out + 22, (uint32)s.channels);
+    _wav_le32(out + 24, (uint32)s.rate);
+    _wav_le32(out + 28, (uint32)(s.rate * s.channels * bits / 8));
+    _wav_le16(out + 32, (uint32)(s.channels * bits / 8));
+    _wav_le16(out + 34, (uint32)bits);
     memcpy(out + 36, "data", 4);
-    _wav_put32(out + 40, (uint32)data_bytes);
+    _wav_le32(out + 40, (uint32)data_bytes);
     for (i in 0..count) {
         float v = s.data[i];
         if (bits == 32) memcpy(out + 44 + i * 4, &v, 4);
@@ -313,7 +313,7 @@ Result<int, string> wav_save(string path, *Sound s, int bits) {
             if (v < -1.0) v = -1.0;
             float scaled = v * 32767.0;
             int q = (int)(scaled < 0.0 ? scaled - 0.5 : scaled + 0.5);
-            _wav_put16(out + 44 + i * 2, (uint32)q & 0xFFFF);
+            _wav_le16(out + 44 + i * 2, (uint32)q & 0xFFFF);
         }
     }
     *void f = fs_open(path, "wb");
