@@ -169,7 +169,6 @@ Mixes playing sounds and streams into a stereo float stream.
 Mixer m = mixer_new(48000);
 uint32 id = m.play(&jump, AudioPlay{volume: 0.8, pan: -0.3});
 m.render(out, 512);      // 512 stereo frames, interleaved
-
 ```
 
 Each voice reads its sound at its own rate and pitch (linear
@@ -624,7 +623,6 @@ Every format becomes interleaved float samples between -1 and 1:
 Sound s = wav_load("jump.wav")?;
 defer s.free();
 printf("%llu frames, %d channels at %d Hz\n", s.frames, s.channels, s.rate);
-
 ```
 
 wav_save writes 16-bit PCM or 32-bit float.

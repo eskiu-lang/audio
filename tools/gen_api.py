@@ -56,6 +56,8 @@ def comment_text(lines):
             out.append("```eskiu")
             code = True
         elif not is_code and code and t.strip() != "":
+            while out and out[-1] == "":
+                out.pop()
             out.append("```")
             out.append("")
             code = False
@@ -192,6 +194,7 @@ def parse(path):
         i += 1
     items = []
     comment = []
+    last_const_end = -2
     while i < len(lines):
         line = lines[i]
         if line.startswith("//"):
@@ -214,7 +217,11 @@ def parse(path):
         if m:
             kind, name = m.group(2), m.group(3)
             head = line.split("{")[0].rstrip()
-            if "{" in line or (i + 1 < len(lines) and lines[i + 1].strip().startswith("{")):
+            one = strip_trailing_comment(line)[0]
+            if "{" in one and one.count("{") == one.count("}"):
+                nxt = i + 1
+                text = one.strip()
+            elif "{" in line or (i + 1 < len(lines) and lines[i + 1].strip().startswith("{")):
                 members, nxt = body_of(lines, i)
                 body = render_body(members)
                 text = head + " {\n" + "\n".join(body) + ("\n" if body else "") + "}"
@@ -247,7 +254,16 @@ def parse(path):
                 c = comment_text(comment) or cmt
                 if len(text) > 160:
                     text = text.split("=")[0].rstrip() + " = ...;"
-                items.append(("const", name, text, c, bool(comment) or bool(cmt)))
+                prev = items[-1] if items else None
+                if not comment and prev and prev[0] == "const" and last_const_end == i - 1 \
+                        and not prev[1].startswith("_"):
+                    # a run of constants with no blank line shares the comment above it
+                    items[-1] = ("const", prev[1] + ", " + name, prev[2] + "\n" + text,
+                                 prev[3] + (("\n\n`" + name + "`: " + cmt) if cmt and prev[3] else ""),
+                                 prev[4] or bool(cmt))
+                else:
+                    items.append(("const", name, text, c, bool(comment) or bool(cmt)))
+                last_const_end = j
             comment = []
             i = j + 1
             continue
