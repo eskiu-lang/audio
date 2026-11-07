@@ -111,6 +111,9 @@ Result<AudioDevice, string> audio_open_with(int rate, AudioOptions options)
 Opens the default output for stereo float samples at rate Hz with `options` (their
 fields apply on iOS and Android).
 
+Opens the default output device for stereo float samples at rate Hz (SDL
+converts to what the device wants). The options are iOS's and Android's.
+
 ### AudioDevice_write
 
 ```eskiu
@@ -119,6 +122,8 @@ Result<int, string> AudioDevice_write(*AudioDevice self, *float samples, int fra
 
 Queues frames stereo frames (interleaved floats) for playback; what does not fit in the
 buffer (buffer_ms) is dropped.
+
+Queues frames stereo frames (interleaved floats) for playback.
 
 ### AudioDevice_queued
 
