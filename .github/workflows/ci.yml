@@ -25,6 +25,8 @@ jobs:
           echo "LD_LIBRARY_PATH=$HOME/sdl3/lib" >> $GITHUB_ENV
       - name: Tests
         run: eskiuc test -L$HOME/sdl3/lib
+      - name: API reference is current
+        run: python3 -I tools/gen_api.py --check
 
   macos:
     runs-on: macos-15
