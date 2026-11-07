@@ -45,6 +45,7 @@ int _wav_s16(*uint8 p) {
     return (int)(int16)_wav_u16(p);
 }
 
+// Frees the samples; the Sound is empty after it.
 void Sound_free(*Sound self) {
     if (self.data != null) free(self.data);
     self.data = null;
@@ -185,6 +186,7 @@ string _wav_msadpcm(*uint8 d, uint64 len, int channels, uint32 align, *int coef1
     return null;
 }
 
+// Reads and decodes the WAV file at path.
 Result<Sound, string> wav_load(string path) {
     int64 n = 0;
     *uint8 d = fs_read_all(path, &n);
@@ -193,6 +195,8 @@ Result<Sound, string> wav_load(string path) {
     return wav_decode(d, (uint64)n);
 }
 
+// Decodes a WAV file held in memory (len bytes at d); the samples are copied, so d can be
+// freed after.
 Result<Sound, string> wav_decode(*uint8 d, uint64 len) {
     if (len < 12 || _wav_u32(d) != 0x46464952 || _wav_u32(d + 8) != 0x45564157) return Err<Sound, string>(_wav_fail("not a WAVE file"));
     uint64 at = 12;

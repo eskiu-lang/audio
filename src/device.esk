@@ -67,6 +67,8 @@ extern void audio_native_resume(*void handle);
 extern void audio_native_clear(*void handle);
 extern void audio_native_close(*void handle);
 
+// Opens the default output for stereo float samples at rate Hz with `options` (their
+// fields apply on iOS and Android).
 Result<AudioDevice, string> audio_open_with(int rate, AudioOptions options) {
     int buffer = rate * (options.buffer_ms > 0 ? options.buffer_ms : 500) / 1000;
     *void stream = audio_native_open(rate, buffer, options.mix_with_others ? 1 : 0, options.ignore_silent ? 1 : 0,
@@ -85,13 +87,16 @@ Result<int, string> AudioDevice_write(*AudioDevice self, *float samples, int fra
 // Frames queued and not yet played.
 int AudioDevice_queued(*AudioDevice self) { return audio_native_queued(self.stream); }
 
+// Pauses playback; what is queued stays queued.
 void AudioDevice_pause(*AudioDevice self) { audio_native_pause(self.stream); }
 
+// Resumes playback after AudioDevice_pause.
 void AudioDevice_resume(*AudioDevice self) { audio_native_resume(self.stream); }
 
 // Drops what is queued and not yet played.
 void AudioDevice_clear(*AudioDevice self) { audio_native_clear(self.stream); }
 
+// Stops the output and frees the device.
 void AudioDevice_close(*AudioDevice self) {
     if (self.stream != null) audio_native_close(self.stream);
     if (self.scratch != null) free(self.scratch);
@@ -147,10 +152,12 @@ int AudioDevice_queued(*AudioDevice self) {
     return bytes < 0 ? 0 : bytes / 8;
 }
 
+// Pauses playback; what is queued stays queued.
 void AudioDevice_pause(*AudioDevice self) {
     SDL_PauseAudioStreamDevice(self.stream);
 }
 
+// Resumes playback after AudioDevice_pause.
 void AudioDevice_resume(*AudioDevice self) {
     SDL_ResumeAudioStreamDevice(self.stream);
 }
@@ -160,6 +167,7 @@ void AudioDevice_clear(*AudioDevice self) {
     SDL_ClearAudioStream(self.stream);
 }
 
+// Stops the output and frees the device.
 void AudioDevice_close(*AudioDevice self) {
     if (self.stream != null) {
         SDL_DestroyAudioStream(self.stream);

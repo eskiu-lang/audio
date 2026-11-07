@@ -35,13 +35,20 @@ interface AudioSource {
     bool done();
 }
 
+// The buses every mixer has: master (everything ends there), music and sfx (both under
+// master). Mixer_add_bus adds more.
 const int AUDIO_BUS_MASTER = 0;
+// The music bus, under master.
 const int AUDIO_BUS_MUSIC = 1;
+// The sound effects bus, under master.
 const int AUDIO_BUS_SFX = 2;
 
 // Frames a source renders at a time, whatever the size of the mix.
 const int64 _MIX_CHUNK = 512;
 
+// How Mixer_play plays a sound: volume (1 is the sound as recorded), pan (-1 left to 1
+// right, equal power), pitch (2 is an octave up and twice as fast), loop, reverse, and the
+// bus it plays on (master by default).
 struct AudioPlay {
     float volume = 1.0;
     float pan;
@@ -92,6 +99,8 @@ struct _Bus {
     float eff;
 }
 
+// Mixes the voices into stereo float frames at `rate` Hz. volume scales the whole mix;
+// mono mixes both channels to the same signal. Make one with mixer_new.
 struct Mixer {
     int rate;
     float volume;
@@ -105,6 +114,8 @@ struct Mixer {
     uint32 bgs;
 }
 
+// A mixer with no voices for output at rate frames per second, with the master, music and
+// sfx buses.
 Mixer mixer_new(int rate) {
     Mixer m;
     m.rate = rate;
@@ -182,6 +193,7 @@ _Voice* _mixer_voice(*Mixer self, uint32 id) {
     return null;
 }
 
+// Whether the voice `id` is still playing (paused counts as playing).
 bool Mixer_playing(*Mixer self, uint32 id) {
     return _mixer_voice(self, id) != null;
 }
@@ -194,6 +206,7 @@ void _mixer_remove(*Mixer self, int k) {
     self.voices.size--;
 }
 
+// Stops the voice `id` at once; an unknown id does nothing.
 void Mixer_stop(*Mixer self, uint32 id) {
     for (i in 0..self.voices.size) {
         if (self.voices.data[i].id == id) {
@@ -203,6 +216,7 @@ void Mixer_stop(*Mixer self, uint32 id) {
     }
 }
 
+// Stops every voice.
 void Mixer_stop_all(*Mixer self) {
     for (i in 0..self.voices.size) {
         if (self.voices.data[i].buf != null) free(self.voices.data[i].buf);
@@ -210,6 +224,7 @@ void Mixer_stop_all(*Mixer self) {
     self.voices.size = 0;
 }
 
+// Sets the voice's volume (1 is the sound as recorded).
 void Mixer_set_volume(*Mixer self, uint32 id, float volume) {
     _Voice* v = _mixer_voice(self, id);
     if (v == null) return;
@@ -217,6 +232,7 @@ void Mixer_set_volume(*Mixer self, uint32 id, float volume) {
     _voice_gains(v);
 }
 
+// Sets the voice's pan, from -1 (left) to 1 (right).
 void Mixer_set_pan(*Mixer self, uint32 id, float pan) {
     _Voice* v = _mixer_voice(self, id);
     if (v == null) return;
@@ -224,6 +240,8 @@ void Mixer_set_pan(*Mixer self, uint32 id, float pan) {
     _voice_gains(v);
 }
 
+// Sets the voice's pitch (1 is the sound's own rate, 2 an octave up); a stream's pitch
+// does not change, and a pitch of 0 or less is ignored.
 void Mixer_set_pitch(*Mixer self, uint32 id, float pitch) {
     _Voice* v = _mixer_voice(self, id);
     if (v == null || v.is_src || pitch <= 0.0) return;
@@ -270,16 +288,19 @@ void Mixer_pause(*Mixer self, uint32 id) {
     if (v != null) v.paused = true;
 }
 
+// Resumes a voice paused with Mixer_pause from where it was.
 void Mixer_resume(*Mixer self, uint32 id) {
     _Voice* v = _mixer_voice(self, id);
     if (v != null) v.paused = false;
 }
 
+// Whether the voice `id` is paused.
 bool Mixer_paused(*Mixer self, uint32 id) {
     _Voice* v = _mixer_voice(self, id);
     return v != null && v.paused;
 }
 
+// The number of voices playing, paused ones included.
 int Mixer_count(*Mixer self) {
     return self.voices.size;
 }
@@ -353,6 +374,8 @@ int Mixer_add_bus(*Mixer self, int parent) {
     return self.buses.size - 1;
 }
 
+// Sets the bus's volume at once (1 leaves it unchanged); the bus scales every voice and
+// bus under it.
 void Mixer_set_bus_volume(*Mixer self, int bus, float volume) {
     if (bus < 0 || bus >= self.buses.size) return;
     _Bus* b = &self.buses.data[bus];
@@ -366,6 +389,8 @@ void Mixer_fade_bus(*Mixer self, int bus, float volume, int ms) {
     _env_to(&b.gain, &b.target, &b.speed, (double)volume, ms);
 }
 
+// The bus's volume now (in the middle of a fade, where the fade is), or 0 for an unknown
+// bus.
 float Mixer_bus_volume(*Mixer self, int bus) {
     if (bus < 0 || bus >= self.buses.size) return 0.0;
     return (float)self.buses.data[bus].gain;
@@ -423,6 +448,7 @@ void Mixer_use_bgs(*Mixer self, uint32 id) {
     self.bgs = id;
 }
 
+// Stops the background sound, if one plays.
 void Mixer_stop_bgs(*Mixer self) {
     if (self.bgs != 0) Mixer_stop(self, self.bgs);
     self.bgs = 0;
@@ -433,10 +459,12 @@ uint32 Mixer_bgm(*Mixer self) {
     return Mixer_playing(self, self.bgm) ? self.bgm : 0;
 }
 
+// The fanfare voice, or 0 when none plays.
 uint32 Mixer_me(*Mixer self) {
     return Mixer_playing(self, self.me) ? self.me : 0;
 }
 
+// The background sound voice, or 0 when none plays.
 uint32 Mixer_bgs(*Mixer self) {
     return Mixer_playing(self, self.bgs) ? self.bgs : 0;
 }
@@ -597,6 +625,7 @@ void Mixer_render(*Mixer self, *float out, int frames) {
     if (!self.manual_clock) _mixer_events(self);
 }
 
+// Stops every voice and frees the mixer's lists; the sounds it played are the caller's.
 void Mixer_free(*Mixer self) {
     Mixer_stop_all(self);
     List_free(&self.voices);
