@@ -4,6 +4,30 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `<audio/ogg>`: an Ogg Vorbis decoder written in Eskiu (after stb_vorbis), so it needs no
+  library and runs on macOS, Linux, Windows, iOS, Android and WebAssembly alike.
+  `ogg_load` and `ogg_decode` decode a whole file; `OggVorbis` (`ogg_open`,
+  `ogg_open_memory`, `read`, `seek`, `tell`) decodes it a block at a time; `OggStream`
+  (`ogg_stream`, `ogg_stream_from`) is an `AudioSource` that plays one through the mixer at
+  the mixer's rate, looping or not, with `seek` and `position`. Seeking is exact to the frame.
+  Against libvorbisfile it gives the same frame counts and samples within 2^-20.
+- Loop points: a file's `LOOPSTART` and `LOOPLENGTH` (or `LOOPEND`) comments, in frames.
+  `Sound.loop_start` and `Sound.loop_end` hold them, and a looping voice plays the sound
+  once to its loop end and then from its loop start to its loop end; a looping `OggStream`
+  does the same.
+- `sound_decode`, which decodes WAV or Ogg Vorbis bytes held in memory, known by their first
+  bytes.
+- `tools/vorbis_ref.py`, which writes libvorbisfile's decoding of a file for the tests.
+
+### Changed
+
+- `sound_load` reads `.ogg` files with `<audio/ogg>` on every platform (on Android they went
+  through the system's codecs before).
+
 ## [0.3.0] - 2026-11-07
 
 ### Added

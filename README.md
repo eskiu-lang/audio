@@ -3,7 +3,7 @@
 </p>
 
 <h2 align="center">audio</h2>
-<p align="center">Sound for Eskiu: WAV files, a mixer and output through SDL3.</p>
+<p align="center">Sound for Eskiu: WAV and Ogg Vorbis files, a mixer and output through SDL3.</p>
 <p align="center"><sub>Part of the <a href="https://github.com/eskiu-lang">Eskiu</a> project</sub></p>
 <p align="center">
   <a href="https://eskiu-lang.org">eskiu-lang.org</a> &nbsp;&middot;&nbsp;
@@ -22,19 +22,23 @@
 ---
 
 `audio` plays sound from Eskiu programs: games, tools and apps. It reads WAV files in every
-common encoding into float samples, mixes any number of them with volume, pan, pitch and
-looping, and sends the mix to the default output device through SDL3.
+common encoding and Ogg Vorbis files into float samples, mixes any number of them with
+volume, pan, pitch and looping, and sends the mix to the default output device through SDL3.
 
 - **WAV files.** 8, 16, 24 and 32-bit PCM, 32 and 64-bit float, IMA ADPCM and Microsoft
   ADPCM, mono to 5.1 and more, decoded exactly as ffmpeg decodes them; 16-bit or float
   output.
+- **Ogg Vorbis files.** Decoded whole, or streamed a block at a time for music, on every
+  platform with no library; loop points from the file's `LOOPSTART` and `LOOPLENGTH`
+  comments, and seeking exact to the frame. The same frame count as libvorbisfile and
+  samples within 2^-20 of it.
 - **A mixer.** Voices with volume, pan, pitch (resampled with linear interpolation from any
   sample rate), loops and reverse, or streams that render themselves; buses, fades and
   crossfades; background music, fanfares and background sound as a game plays them. Its
   output depends only on the calls made to it, so it records offline exactly.
 - **Output.** One call keeps the device fed from the mixer, from the program's main loop.
-- **Pure Eskiu where it can be.** `<audio/wav>` and `<audio/mixer>` need nothing but the
-  compiler; only `<audio/device>` links SDL3.
+- **Pure Eskiu where it can be.** `<audio/wav>`, `<audio/ogg>` and `<audio/mixer>` need
+  nothing but the compiler; only `<audio/device>` links SDL3.
 
 ## Playing a sound
 
@@ -69,12 +73,13 @@ uint32 song = m.play(&intro, AudioPlay{});
 m.then(song, &loop, true);    // the loop starts on the sample after the intro's last
 ```
 
-[`examples/play.esk`](examples/play.esk) plays a WAV file or, given none, a chord it makes on
-the spot.
+[`examples/play.esk`](examples/play.esk) plays a WAV or Ogg Vorbis file or, given none, a chord
+it makes on the spot.
 
 ## Documentation
 
 - [Music, fanfares and effects](docs/guide.md#music-fanfares-and-effects)
+- [Ogg Vorbis files](docs/guide.md#ogg-vorbis-files)
 - [Streams](docs/guide.md#streams)
 - [Recording: offline mixing](docs/guide.md#recording-offline-mixing)
 - [Platforms](docs/README.md#platforms)
@@ -95,4 +100,6 @@ eskiuc build -L/opt/homebrew/lib       # the directory that holds libSDL3
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The Ogg Vorbis decoder (`src/ogg.esk`) is a port of
+[stb_vorbis](https://github.com/nothings/stb) by Sean Barrett and the stb_vorbis
+contributors, which is in the public domain or under the MIT license, at your choice.
