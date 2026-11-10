@@ -526,10 +526,18 @@ float _sample(*Sound s, uint64 frame, int ch) {
 bool _voice_sound_frame(*Mixer self, _Voice* v, *float l, *float r) {
     *Sound s = v.sound;
     if (s.frames == 0) return false;
+    // A looping voice wraps from the sound's loop end to its loop start (the whole sound
+    // without loop points, or when it plays backwards).
+    uint64 ls = 0;
+    uint64 le = s.frames;
+    if (v.loop && !v.reverse && s.loop_end > s.loop_start && s.loop_end <= s.frames) {
+        ls = s.loop_start;
+        le = s.loop_end;
+    }
     uint64 i0 = (uint64)v.pos;
     double t = v.pos - (double)i0;
     uint64 i1 = i0 + 1;
-    if (i1 >= s.frames) i1 = v.loop ? 0 : i0;
+    if (i1 >= le) i1 = v.loop ? ls : i0;
     if (v.reverse) {
         i0 = s.frames - 1 - i0;
         i1 = s.frames - 1 - i1;
@@ -541,9 +549,12 @@ bool _voice_sound_frame(*Mixer self, _Voice* v, *float l, *float r) {
     *l = l0 + (l1 - l0) * (float)t;
     *r = r0 + (r1 - r0) * (float)t;
     v.pos = v.pos + v.step;
-    if (v.pos >= (double)s.frames) {
-        if (v.loop) v.pos = v.pos - (double)s.frames * (double)(uint64)(v.pos / (double)s.frames);
-        else if (v.next != null && v.next.frames > 0) {
+    if (v.loop && v.pos >= (double)le) {
+        double span = (double)(le - ls);
+        double p = v.pos - (double)ls;
+        v.pos = (double)ls + (p - span * (double)(uint64)(p / span));
+    } else if (v.pos >= (double)s.frames) {
+        if (v.next != null && v.next.frames > 0) {
             // What is left over carries into the next sound, at its rate.
             double over = (v.pos - (double)s.frames) / (double)s.rate * (double)v.next.rate;
             v.sound = v.next;
