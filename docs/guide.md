@@ -40,6 +40,48 @@ and `set_mono(true)` sends the average of both channels to both sides.
 volume. Without it pan is equal power, which suits a mono sound but plays a centered stereo
 sound 3 dB lower.
 
+## Ogg Vorbis files
+
+`<audio/ogg>` decodes Ogg Vorbis in Eskiu, with no library, on every platform the package
+builds for (WebAssembly included). A short sound decodes whole into a `Sound`; music streams,
+a block at a time as the mixer asks for it:
+
+```eskiu
+Sound jump = ogg_load("se/jump.ogg")?;            // or sound_load, which goes by the name
+defer jump.free();
+m.play(&jump, AudioPlay{bus: AUDIO_BUS_SFX});
+
+OggStream town = ogg_stream("bgm/town.ogg", m.rate, true)?;   // at the mixer's rate, looping
+defer town.free();
+m.use_bgm(m.play_source(&town, AudioPlay{bus: AUDIO_BUS_MUSIC}), 500);
+```
+
+A file in memory (from an archive or a download) opens with `ogg_decode(bytes, len)` or
+`ogg_open_memory(bytes, len)`; `sound_decode(bytes, len)` takes WAV or Ogg Vorbis bytes and
+tells them apart by their first bytes.
+
+**Loop points.** A file's `LOOPSTART` and `LOOPLENGTH` comments (or `LOOPSTART` and
+`LOOPEND`), in frames, are its loop points (the convention RPG Maker started). A looping stream plays the file once to the loop end, then from the loop start to
+the loop end again and again; without loop points it loops the whole file. `ogg_load` copies
+them to the `Sound`'s `loop_start` and `loop_end`, and a looping voice of that sound wraps the
+same way. A `Sound` from anywhere else can be given loop points by setting those two fields.
+
+**Seeking.** `OggStream.seek(seconds)` and `OggVorbis.seek(frame)` land on the exact frame:
+the frames read after a seek are the ones a decode from the start gives there, and a seek
+decodes at most two packets. `position()` says where a stream is, in seconds of the file.
+
+**Rates and channels.** A stream renders at the rate it was opened with, resampling the file
+with linear interpolation as a voice does; at the file's own rate its frames pass through
+unchanged. A mono file plays on both sides, and a file with more than two channels plays its
+first two.
+
+**Accuracy.** The decoder follows the Vorbis I specification and stb_vorbis. Against
+libvorbisfile, the reference decoder, it gives the same number of frames (the encoder's
+padding cut from the start and the end) and samples within 2^-20 (`tests/ogg.esk` checks
+files from libvorbis and from ffmpeg's encoder). It reads every Vorbis I stream with floor 1,
+which is what encoders write; the obsolete floor 0 is refused. Decoding reads no clock and
+calls no system codec, so a file gives the same samples on every run.
+
 ## Streams
 
 A voice can play anything that renders itself, through the `AudioSource` interface:
@@ -74,7 +116,7 @@ SeqSource seq = SeqSource{player: SdatPlayer_open(&sdat, 0, true)?};
 m.use_bgm(m.play_source(&seq, AudioPlay{bus: AUDIO_BUS_MUSIC}), 500);
 ```
 
-The same struct shape adapts a decoder or a synthesizer.
+The same struct shape adapts a decoder or a synthesizer; `OggStream` is one already.
 
 ## Recording: offline mixing
 
@@ -82,7 +124,8 @@ The mixer never reads a clock. What it renders depends only on the calls made to
 frame counts asked for: the same calls give the same bytes on every run, and a render of 4096
 frames gives the same samples as the same frames rendered 1 or 7 at a time (the tests check
 both). So a game can record a video's soundtrack with no device, frame by frame, and write it
-with `wav_save`.
+with `wav_save`. An `OggStream` keeps the guarantee: it decodes the same frames for the same
+calls.
 
 By default the timers (fades, the end of a fanfare) run on the rendered frames, sample by
 sample. A recorder that steps a video clock can run them on that clock instead:

@@ -11,7 +11,7 @@ Guides and reference for audio. The [README](../README.md) has the overview.
 
 | Modules | macOS, Linux, Windows | iOS, Android | WebAssembly |
 |---|---|---|---|
-| `<audio/wav>`, `<audio/mixer>` | yes | yes | yes |
+| `<audio/wav>`, `<audio/ogg>`, `<audio/mixer>` | yes | yes | yes |
 | `<audio/device>` (and `<audio>`, which imports it) | SDL3 | yes, in an [eskiu-lang/ui](https://github.com/eskiu-lang/ui) app | not yet |
 
 On a phone `<audio/device>` needs no SDL3: its native code (`native/`), which a ui app builds
@@ -45,8 +45,9 @@ stream whose output goes away (headphones unplugged) opens again on the new one.
 | Module | What it has |
 |---|---|
 | `<audio>` | the modules below |
-| `<audio/wav>` | `Sound`, `wav_load`, `wav_decode`, `wav_save`, `sound_new` |
-| `<audio/decode>` | `sound_load`: WAV everywhere; MP3, AAC / M4A and FLAC (and Ogg Vorbis, Opus on Android) through the system's codecs on iOS and Android |
+| `<audio/wav>` | `Sound` (with its loop points), `wav_load`, `wav_decode`, `wav_save`, `sound_new` |
+| `<audio/ogg>` | `ogg_load`, `ogg_decode`; `OggVorbis` (`ogg_open`, `ogg_open_memory`, `read`, `seek`, `tell`); `OggStream` (`ogg_stream`, `ogg_stream_from`, `render`, `done`, `seek`, `position`), an `AudioSource` |
+| `<audio/decode>` | `sound_load` and `sound_decode`: WAV and Ogg Vorbis everywhere; MP3, AAC / M4A and FLAC (and Opus on Android) through the system's codecs on iOS and Android |
 | `<audio/mixer>` | `Mixer`, `mixer_new`, `play`, `play_source`, `then`, `stop`, `pause`, `resume`, `seek`, `position`, `current`, `set_volume`, `set_pan`, `set_pitch`, `render`, `AudioPlay`, `AudioSource`; buses (`add_bus`, `set_bus`, `set_bus_volume`, `fade_bus`, `bus_volume`); fades (`fade`, `fade_in`, `fade_out`, `crossfade`, `fade_level`); roles (`use_bgm`, `stop_bgm`, `use_me`, `use_bgs`, `stop_bgs`, `bgm`, `me`, `bgs`); `set_mono`, `set_manual_clock`, `advance` |
 | `<audio/device>` | `AudioDevice`, `audio_open`, `audio_open_with`, `AudioOptions`, `write`, `queued`, `pump`, `pause`, `resume`, `clear` (SDL3 on the desktop) |
 
@@ -64,5 +65,7 @@ free(path);
 
 Bug reports are welcome; please include the program and the `eskiuc --version` output. The
 tests run with `eskiuc test -L/opt/homebrew/lib`; the device test uses SDL's silent dummy
-driver, so it needs no sound card. `tools/gen_test_audio.sh` regenerates the WAV files in
-`tests/data` and ffmpeg's decoding of each, which the tests compare against.
+driver, so it needs no sound card. `tools/gen_test_audio.sh` regenerates the WAV and Ogg
+Vorbis files in `tests/data` and the reference decoding of each, which the tests compare
+against: ffmpeg's for WAV, libvorbisfile's for Ogg Vorbis (through `tools/vorbis_ref.py`). It
+needs ffmpeg, libsndfile's `sndfile-convert` and libvorbisfile.
