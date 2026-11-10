@@ -1,5 +1,5 @@
-// Plays a WAV file, or a chord made on the spot when no file is given:
-//     eskiuc run -L/opt/homebrew/lib examples/play.esk [sound.wav]
+// Plays a WAV or Ogg Vorbis file, or a chord made on the spot when no file is given:
+//     eskiuc run -L/opt/homebrew/lib examples/play.esk [sound.wav | sound.ogg]
 import <io>;
 import <mem>;
 import <time>;
@@ -21,7 +21,7 @@ Sound chord() {
 
 Result<int, string> run(string path) {
     Sound sound;
-    if (path != null) sound = wav_load(path)?;
+    if (path != null) sound = sound_load(path)?;
     else sound = chord();
     defer sound.free();
     AudioDevice out = audio_open(48000)?;
