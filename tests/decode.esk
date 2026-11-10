@@ -1,11 +1,46 @@
 import <io>;
+import <fs>;
+import <mem>;
 import <audio/decode>;
 int main() {
     Result<Sound, string> s = sound_load("tests/data/f32.wav");
-    if (!s.ok) { printf("FAIL %s\n", s.error); return 1; }
-    Result<Sound, string> m = sound_load("x.mp3");
-    if (m.ok) { printf("FAIL mp3 on desktop\n"); return 1; }
-    printf("PASS decode\n");
+    if (!s.ok) {
+        printf("FAIL %s\n", s.error);
+        return 1;
+    }
     s.value.free();
+    Result<Sound, string> o2 = sound_load("tests/data/ogg_mono.ogg");
+    if (!o2.ok || o2.value.frames != 1103) {
+        printf("FAIL ogg\n");
+        return 1;
+    }
+    o2.value.free();
+    Result<Sound, string> m = sound_load("x.mp3");
+    if (m.ok) {
+        printf("FAIL mp3 on desktop\n");
+        return 1;
+    }
+    int64 n = 0;
+    *uint8 bytes = fs_read_all("tests/data/ogg_stereo.ogg", &n);
+    Result<Sound, string> b = sound_decode(bytes, (uint64)n);
+    free(bytes);
+    if (!b.ok || b.value.channels != 2) {
+        printf("FAIL sound_decode of Ogg Vorbis bytes\n");
+        return 1;
+    }
+    b.value.free();
+    bytes = fs_read_all("tests/data/s16.wav", &n);
+    b = sound_decode(bytes, (uint64)n);
+    free(bytes);
+    if (!b.ok || b.value.channels != 2) {
+        printf("FAIL sound_decode of WAV bytes\n");
+        return 1;
+    }
+    b.value.free();
+    if (sound_decode((*uint8)"ID3 tag", 7).ok) {
+        printf("FAIL sound_decode of other bytes\n");
+        return 1;
+    }
+    printf("PASS decode\n");
     return 0;
 }
