@@ -16,12 +16,15 @@ import <result>;
 import <fs>;
 
 // frames samples per channel, interleaved: data holds frames * channels
-// floats.
+// floats. A looping voice plays it from loop_start to loop_end (frames, loop_end
+// exclusive) after its first pass to loop_end; with loop_end 0 it loops the whole sound.
 struct Sound {
     *float data;
     uint64 frames;
     int channels;
     int rate;
+    uint64 loop_start;
+    uint64 loop_end;
 }
 
 String _wav_err;
