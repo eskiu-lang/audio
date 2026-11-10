@@ -1,32 +1,43 @@
-// decode.esk: sound_load reads a sound file into a Sound: WAV on every platform (<audio/wav>),
-// and on iOS and Android also what the system decodes (MP3, AAC / M4A, FLAC; Ogg Vorbis and
-// Opus on Android) through its own codecs (native/, built in by eskiu-lang/ui apps). A file
-// from the network is downloaded first (ui_fetch, <fetch>) and loaded from disk.
+// decode.esk: sound_load reads a sound file into a Sound: WAV (<audio/wav>) and Ogg Vorbis
+// (<audio/ogg>) on every platform, and on iOS and Android also what the system decodes
+// (MP3, AAC / M4A, FLAC; Opus on Android) through its own codecs (native/, built in by
+// eskiu-lang/ui apps). A file from the network is downloaded first (ui_fetch, <fetch>) and
+// loaded from disk.
 //
 //     Sound music = sound_load(path)?;
 //     defer music.free();
+//
+// sound_decode reads a WAV or Ogg Vorbis file already in memory, by its first bytes.
 
 import <mem>;
 import <string>;
 import <result>;
 import <audio/wav>;
+import <audio/ogg>;
 
 #if defined(__ANDROID__) || defined(TARGET_OS_IPHONE)
 extern *float audio_native_decode(string path, *int64 frames, *int channels, *int rate);
 extern string audio_native_error();
 #endif
 
-bool _sound_is_wav(string path) {
+// Whether path ends in "." and ext (lowercase letters), in any case.
+bool _sound_ext(string path, string ext) {
     int64 n = strlen(path);
-    if (n < 4) return false;
-    string end = path + (n - 4);
-    return (end[0] == '.') && (end[1] == 'w' || end[1] == 'W') && (end[2] == 'a' || end[2] == 'A') &&
-        (end[3] == 'v' || end[3] == 'V');
+    int64 e = strlen(ext);
+    if (n < e + 1 || path[n - e - 1] != '.') return false;
+    for (i in 0..e) {
+        char c = path[n - e + i];
+        if (c >= 'A' && c <= 'Z') c = (char)((int)c + 32);
+        if (c != ext[i]) return false;
+    }
+    return true;
 }
 
-// Reads and decodes the sound file at `path` (by its name: .wav is read by <audio/wav>).
+// Reads and decodes the sound file at `path` (by its name: .wav is read by <audio/wav>,
+// .ogg by <audio/ogg>).
 Result<Sound, string> sound_load(string path) {
-    if (_sound_is_wav(path)) return wav_load(path);
+    if (_sound_ext(path, "wav")) return wav_load(path);
+    if (_sound_ext(path, "ogg") || _sound_ext(path, "oga")) return ogg_load(path);
 #if defined(__ANDROID__) || defined(TARGET_OS_IPHONE)
     int64 frames = 0;
     int channels = 0;
@@ -35,6 +46,14 @@ Result<Sound, string> sound_load(string path) {
     if (data == null) return Err<Sound, string>(audio_native_error());
     return Ok<Sound, string>(Sound{data, (uint64)frames, channels, rate});
 #else
-    return Err<Sound, string>("audio: only WAV is read on this platform (other formats on iOS and Android)");
+    return Err<Sound, string>("audio: only WAV and Ogg Vorbis are read on this platform (other formats on iOS and Android)");
 #endif
+}
+
+// Decodes a WAV or Ogg Vorbis file held in memory (len bytes at d), known by its first
+// bytes; the samples are copied, so d can be freed after.
+Result<Sound, string> sound_decode(*uint8 d, uint64 len) {
+    if (len >= 4 && d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F') return wav_decode(d, len);
+    if (len >= 4 && d[0] == 'O' && d[1] == 'g' && d[2] == 'g' && d[3] == 'S') return ogg_decode(d, len);
+    return Err<Sound, string>("audio: not a WAV or Ogg Vorbis file");
 }
