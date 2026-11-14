@@ -4,7 +4,19 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.4.0] - 2026-11-10
+## [Unreleased]
+
+### Added
+
+- Sound in space (ViroReact's `ViroSpatialSound` and `ViroSoundField`): `Mixer_play_at`
+  places a voice at a point, panned by where it is around the listener and faded by
+  `AUDIO_ROLLOFF_NONE`, `_LINEAR` or `_LOGARITHMIC` between a minimum and a maximum distance
+  (Resonance Audio's curves, `audio_rolloff_gain`); `Mixer_set_position`,
+  `Mixer_set_rolloff`; `Mixer_play_field` plays a first-order AmbiX recording around the
+  listener, turned by `Mixer_set_field_rotation`; `Mixer_set_listener` and
+  `Mixer_set_listener_pose` place the listener.
+
+## [0.4.0]
 
 ### Added
 

@@ -118,6 +118,45 @@ m.use_bgm(m.play_source(&seq, AudioPlay{bus: AUDIO_BUS_MUSIC}), 500);
 
 The same struct shape adapts a decoder or a synthesizer; `OggStream` is one already.
 
+## Sound in space
+
+A voice can sit at a point around a listener (ViroReact's `ViroSpatialSound`) or be a
+first-order ambisonic recording around it (`ViroSoundField`). The listener is the camera:
+set it each frame from the camera's position and rotation.
+
+```eskiu
+uint32 bird = m.play_at(&chirp, AudioPlay{loop: true}, AudioVec3{2.0, 1.0, -3.0});
+m.set_rolloff(bird, AUDIO_ROLLOFF_LOGARITHMIC, 1.0, 20.0);
+uint32 forest = m.play_field(&ambix, AudioPlay{loop: true}, AudioQuat{0.0, 0.0, 0.0, 1.0});
+...each frame:
+m.set_listener_pose(AudioVec3{cam.x, cam.y, cam.z}, AudioQuat{q.x, q.y, q.z, q.w});
+m.set_position(bird, AudioVec3{x, y, z});
+```
+
+The axes are ViroReact's: x right, y up, and the listener looks along -z before its
+rotation. `Mixer_set_listener` takes a forward and an up direction instead of a rotation.
+
+A positioned sound's channels are mixed to one, panned with equal power by how far to the
+listener's right or left it is, and faded by its rolloff model, with the curves of Resonance
+Audio (the engine ViroReact plays spatial sound through):
+
+| Model | Gain at distance d |
+|---|---|
+| `AUDIO_ROLLOFF_NONE` (default) | 1 |
+| `AUDIO_ROLLOFF_LINEAR` | (max - d) / (max - min) |
+| `AUDIO_ROLLOFF_LOGARITHMIC` | 1 / (d - min + 1), shifted down so it reaches 0 at max |
+
+A distance under min (and under 1, whatever min is) plays at full volume, and past max the
+sound is silent. `audio_rolloff_gain` returns the curve's value.
+
+A sound field has four channels in AmbiX order (W, Y, Z, X: y to the left, z up, x ahead).
+The mixer decodes it to two cardioid microphones pointing to the listener's ears, so it
+turns as the listener turns; `Mixer_set_field_rotation` turns the field itself.
+
+ViroReact renders spatial sound binaurally (head-related filters for headphones, height and
+front or back) and can add room reverb. This mixer pans in stereo, so a sound ahead and one
+behind sound alike, and has no rooms.
+
 ## Recording: offline mixing
 
 The mixer never reads a clock. What it renders depends only on the calls made to it and the

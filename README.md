@@ -81,6 +81,7 @@ it makes on the spot.
 - [Music, fanfares and effects](docs/guide.md#music-fanfares-and-effects)
 - [Ogg Vorbis files](docs/guide.md#ogg-vorbis-files)
 - [Streams](docs/guide.md#streams)
+- [Sound in space](docs/guide.md#sound-in-space)
 - [Recording: offline mixing](docs/guide.md#recording-offline-mixing)
 - [Platforms](docs/README.md#platforms)
 - [Modules](docs/README.md#modules)

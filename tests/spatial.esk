@@ -1,0 +1,122 @@
+// Sound in space: a positioned sound panned by where it is around the listener, faded by
+// ViroReact's rolloff models (Resonance Audio's curves), moved, a turned listener, and a
+// first-order ambisonic sound field turned by the listener and by its own rotation.
+import <io>;
+import <mem>;
+import <libc>;
+import <audio/wav>;
+import <audio/mixer>;
+
+int fails = 0;
+
+void check(string what, bool ok) {
+    if (!ok) {
+        printf("FAIL %s\n", what);
+        fails++;
+    }
+}
+
+bool near(float a, float b, float tol) {
+    return fabsf(a - b) <= tol;
+}
+
+// one rendered frame of a single voice
+void frame(*Mixer m, *float out) {
+    Mixer_render(m, out, 1);
+}
+
+int main() {
+    // a constant mono signal, and a stereo one whose channels average to the same 0.5
+    Sound mono = sound_new(1000, 1, 48000);
+    for (i in 0..1000) mono.data[i] = 0.5;
+    Sound stereo = sound_new(1000, 2, 48000);
+    for (i in 0..1000) {
+        stereo.data[i * 2] = 1.0;
+        stereo.data[i * 2 + 1] = 0.0;
+    }
+    float[2] out;
+    float h = 0.5 * 0.70710678;
+
+    Mixer m = mixer_new(48000);
+    uint32 a = Mixer_play_at(&m, &mono, AudioPlay{loop: true}, AudioVec3{0.0, 0.0, -3.0});
+    frame(&m, &out[0]);
+    check("ahead: centered", near(out[0], h, 1e-5) && near(out[1], h, 1e-5));
+    Mixer_set_position(&m, a, AudioVec3{2.0, 0.0, 0.0});
+    frame(&m, &out[0]);
+    check("to the right: right only", near(out[0], 0.0, 1e-5) && near(out[1], 0.5, 1e-5));
+    Mixer_set_position(&m, a, AudioVec3{-1.0, 0.0, -1.0});
+    frame(&m, &out[0]);
+    check("ahead left: more left", out[0] > out[1] && near(out[0] * out[0] + out[1] * out[1], 0.25, 1e-5));
+    // no rolloff by default: as loud far away
+    Mixer_set_position(&m, a, AudioVec3{0.0, 0.0, -100.0});
+    frame(&m, &out[0]);
+    check("no rolloff by default", near(out[0], h, 1e-5));
+
+    // linear: from 1 (min) to 11 (max), half at 6
+    Mixer_set_rolloff(&m, a, AUDIO_ROLLOFF_LINEAR, 1.0, 11.0);
+    Mixer_set_position(&m, a, AudioVec3{0.0, 0.0, -6.0});
+    frame(&m, &out[0]);
+    check("linear: half way", near(out[0], h * 0.5, 1e-5));
+    Mixer_set_position(&m, a, AudioVec3{0.0, 0.0, -0.5});
+    frame(&m, &out[0]);
+    check("inside min: full", near(out[0], h, 1e-5));
+    Mixer_set_position(&m, a, AudioVec3{0.0, 0.0, -12.0});
+    frame(&m, &out[0]);
+    check("past max: silent", near(out[0], 0.0, 1e-6) && near(out[1], 0.0, 1e-6));
+    // logarithmic: 1 / (d - min + 1), shifted to reach 0 at max
+    Mixer_set_rolloff(&m, a, AUDIO_ROLLOFF_LOGARITHMIC, 1.0, 10.0);
+    Mixer_set_position(&m, a, AudioVec3{0.0, 0.0, -3.0});
+    frame(&m, &out[0]);
+    float lg = (1.0 / 3.0 - 0.1) / 0.9;
+    check("logarithmic at 3", near(out[0], h * lg, 1e-5));
+    check("curves", near(audio_rolloff_gain(AUDIO_ROLLOFF_LOGARITHMIC, 10.0, 1.0, 10.0), 0.0, 1e-6) &&
+        near(audio_rolloff_gain(AUDIO_ROLLOFF_LINEAR, 3.0, 0.2, 5.0), 0.5, 1e-6) &&
+        audio_rolloff_gain(AUDIO_ROLLOFF_NONE, 1000.0, 1.0, 2.0) == 1.0);
+
+    // the listener: moved to the sound, then turned around
+    Mixer_set_rolloff(&m, a, AUDIO_ROLLOFF_NONE, 1.0, 10.0);
+    Mixer_set_position(&m, a, AudioVec3{2.0, 0.0, 0.0});
+    Mixer_set_listener_pose(&m, AudioVec3{0.0, 0.0, 0.0}, AudioQuat{0.0, 1.0, 0.0, 0.0});
+    frame(&m, &out[0]);
+    check("turned around: the sound on the right is on the left", near(out[0], 0.5, 1e-5) && near(out[1], 0.0, 1e-5));
+    Mixer_set_listener(&m, AudioVec3{4.0, 0.0, 0.0}, AudioVec3{0.0, 0.0, -1.0}, AudioVec3{0.0, 1.0, 0.0});
+    frame(&m, &out[0]);
+    check("listener moved past it: on the left", near(out[0], 0.5, 1e-5) && near(out[1], 0.0, 1e-5));
+    Mixer_stop(&m, a);
+    Mixer_set_listener(&m, AudioVec3{0.0, 0.0, 0.0}, AudioVec3{0.0, 0.0, -1.0}, AudioVec3{0.0, 1.0, 0.0});
+    // a stereo sound in space is mixed to one point
+    uint32 b = Mixer_play_at(&m, &stereo, AudioPlay{loop: true}, AudioVec3{0.0, 0.0, -1.0});
+    frame(&m, &out[0]);
+    check("channels mixed to a point", near(out[0], h, 1e-5) && near(out[1], h, 1e-5));
+    Mixer_stop(&m, b);
+
+    // a sound field: W 1 and Y 1 is a sound to the left (AmbiX: y is left)
+    Sound field = sound_new(1000, 4, 48000);
+    for (i in 0..1000) {
+        field.data[i * 4] = 1.0;
+        field.data[i * 4 + 1] = 1.0;
+    }
+    uint32 f = Mixer_play_field(&m, &field, AudioPlay{loop: true}, AudioQuat{0.0, 0.0, 0.0, 1.0});
+    frame(&m, &out[0]);
+    check("field: left", near(out[0], 1.0, 1e-5) && near(out[1], 0.0, 1e-5));
+    Mixer_set_listener_pose(&m, AudioVec3{0.0, 0.0, 0.0}, AudioQuat{0.0, 1.0, 0.0, 0.0});
+    frame(&m, &out[0]);
+    check("field, listener turned around: right", near(out[0], 0.0, 1e-5) && near(out[1], 1.0, 1e-5));
+    Mixer_set_listener_pose(&m, AudioVec3{0.0, 0.0, 0.0}, AudioQuat{0.0, 0.0, 0.0, 1.0});
+    // turned 90 degrees to the right about y, the field's left is ahead
+    float s = 0.70710678;
+    Mixer_set_field_rotation(&m, f, AudioQuat{0.0, -s, 0.0, s});
+    frame(&m, &out[0]);
+    check("field turned: its left ahead, centered", near(out[0], 0.5, 1e-5) && near(out[1], 0.5, 1e-5));
+    Mixer_set_listener_pose(&m, AudioVec3{0.0, 0.0, 0.0}, AudioQuat{0.0, -s, 0.0, s});
+    frame(&m, &out[0]);
+    check("listener turned with it: left again", near(out[0], 1.0, 1e-5) && near(out[1], 0.0, 1e-5));
+
+    Mixer_free(&m);
+    Sound_free(&mono);
+    Sound_free(&stereo);
+    Sound_free(&field);
+    if (fails > 0) return 1;
+    printf("spatial: ok\n");
+    return 0;
+}

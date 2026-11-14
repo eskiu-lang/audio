@@ -264,6 +264,60 @@ How Mixer_play plays a sound: volume (1 is the sound as recorded), pan (-1 left 
 right, equal power), pitch (2 is an octave up and twice as fast), loop, reverse, and the
 bus it plays on (master by default).
 
+### AudioVec3
+
+```eskiu
+struct AudioVec3 {
+    float x;
+    float y;
+    float z;
+}
+```
+
+A point or direction in the listener's world: x right, y up, -z ahead (ViroReact's
+axes).
+
+### AudioQuat
+
+```eskiu
+struct AudioQuat {
+    float x;
+    float y;
+    float z;
+    float w = 1.0;
+}
+```
+
+A rotation (x, y, z vector part, w scalar part), as gpu's Quat.
+
+### AUDIO_ROLLOFF_NONE
+
+```eskiu
+const int AUDIO_ROLLOFF_NONE = 0;
+```
+
+How a positioned sound fades with distance (ViroReact's rolloffModel): not at all, in a
+straight line from min_distance to silence at max_distance, or along 1 / (d + 1) from
+min_distance, shifted to reach silence at max_distance. Distances under 1 count as 1, and
+past max_distance the sound is silent (Resonance Audio's curves, which ViroReact plays
+through).
+
+### AUDIO_ROLLOFF_LINEAR
+
+```eskiu
+const int AUDIO_ROLLOFF_LINEAR = 1;
+```
+
+Linear fall from min_distance to silence at max_distance.
+
+### AUDIO_ROLLOFF_LOGARITHMIC
+
+```eskiu
+const int AUDIO_ROLLOFF_LOGARITHMIC = 2;
+```
+
+1 / (d + 1) from min_distance, reaching silence at max_distance.
+
 ### Mixer
 
 ```eskiu
@@ -278,6 +332,9 @@ struct Mixer {
     uint32 bgm;
     uint32 me;
     uint32 bgs;
+    AudioVec3 listener;
+    AudioVec3 listener_forward;
+    AudioVec3 listener_up;
 }
 ```
 
@@ -620,6 +677,77 @@ void Mixer_render(*Mixer self, *float out, int frames)
 Writes frames stereo frames (2 * frames floats) of the mix into out and
 advances every voice; voices that end are removed. Voices add in the
 order they started.
+
+### audio_rolloff_gain
+
+```eskiu
+float audio_rolloff_gain(int model, float distance, float min_distance, float max_distance)
+```
+
+The gain of a positioned sound at distance from the listener, for a rolloff model
+(Resonance Audio's distance attenuation).
+
+### Mixer_set_listener
+
+```eskiu
+void Mixer_set_listener(*Mixer self, AudioVec3 position, AudioVec3 forward, AudioVec3 up)
+```
+
+Places the listener (the camera): its position, the direction it faces and its up.
+Positioned sounds and sound fields follow it.
+
+### Mixer_set_listener_pose
+
+```eskiu
+void Mixer_set_listener_pose(*Mixer self, AudioVec3 position, AudioQuat rotation)
+```
+
+Places the listener from a rotation: ahead is -z and up is y turned by rotation.
+
+### Mixer_play_at
+
+```eskiu
+uint32 Mixer_play_at(*Mixer self, *Sound sound, AudioPlay opt, AudioVec3 position)
+```
+
+Starts sound at position (ViroReact's ViroSpatialSound): its channels mixed to one,
+panned by where it is around the listener and faded by distance with the voice's rolloff
+(none until Mixer_set_rolloff). opt.pan does not apply.
+
+### Mixer_set_position
+
+```eskiu
+void Mixer_set_position(*Mixer self, uint32 id, AudioVec3 position)
+```
+
+Moves a positioned sound.
+
+### Mixer_set_rolloff
+
+```eskiu
+void Mixer_set_rolloff(*Mixer self, uint32 id, int model, float min_distance, float max_distance)
+```
+
+Sets how a positioned sound fades with distance: an AUDIO_ROLLOFF_ model, the distance
+where fading starts and the one where it reaches silence.
+
+### Mixer_play_field
+
+```eskiu
+uint32 Mixer_play_field(*Mixer self, *Sound sound, AudioPlay opt, AudioQuat rotation)
+```
+
+Starts a first-order ambisonic sound (ViroReact's ViroSoundField): four channels in AmbiX
+order (W, Y, Z, X), turned by rotation, heard from the listener's orientation. A sound
+with fewer channels plays as an ordinary one.
+
+### Mixer_set_field_rotation
+
+```eskiu
+void Mixer_set_field_rotation(*Mixer self, uint32 id, AudioQuat rotation)
+```
+
+Turns a sound field.
 
 ### Mixer_free
 

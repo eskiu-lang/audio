@@ -60,6 +60,37 @@ struct AudioPlay {
     int bus;
 }
 
+// A point or direction in the listener's world: x right, y up, -z ahead (ViroReact's
+// axes).
+struct AudioVec3 {
+    float x;
+    float y;
+    float z;
+}
+
+// A rotation (x, y, z vector part, w scalar part), as gpu's Quat.
+struct AudioQuat {
+    float x;
+    float y;
+    float z;
+    float w = 1.0;
+}
+
+// How a positioned sound fades with distance (ViroReact's rolloffModel): not at all, in a
+// straight line from min_distance to silence at max_distance, or along 1 / (d + 1) from
+// min_distance, shifted to reach silence at max_distance. Distances under 1 count as 1, and
+// past max_distance the sound is silent (Resonance Audio's curves, which ViroReact plays
+// through).
+const int AUDIO_ROLLOFF_NONE = 0;
+// Linear fall from min_distance to silence at max_distance.
+const int AUDIO_ROLLOFF_LINEAR = 1;
+// 1 / (d + 1) from min_distance, reaching silence at max_distance.
+const int AUDIO_ROLLOFF_LOGARITHMIC = 2;
+
+const int _SPACE_NONE = 0;
+const int _SPACE_POINT = 1;
+const int _SPACE_FIELD = 2;
+
 struct _Voice {
     uint32 id;
     *Sound sound;
@@ -69,6 +100,8 @@ struct _Voice {
     float right;
     float volume;
     float pan;
+    float space_gain;
+    float space_pan;
     bool loop;
     float pitch;
     *Sound next;
@@ -89,6 +122,15 @@ struct _Voice {
     int64 buf_pos;
     bool src_done;
     uint64 played;
+    int space;
+    AudioVec3 position;
+    int rolloff;
+    float min_distance;
+    float max_distance;
+    AudioQuat field_rotation;
+    float kx;
+    float ky;
+    float kz;
 }
 
 struct _Bus {
@@ -112,6 +154,9 @@ struct Mixer {
     uint32 bgm;
     uint32 me;
     uint32 bgs;
+    AudioVec3 listener;
+    AudioVec3 listener_forward;
+    AudioVec3 listener_up;
 }
 
 // A mixer with no voices for output at rate frames per second, with the master, music and
@@ -121,6 +166,8 @@ Mixer mixer_new(int rate) {
     m.rate = rate;
     m.volume = 1.0;
     m.next_id = 1;
+    m.listener_forward = AudioVec3{0.0, 0.0, -1.0};
+    m.listener_up = AudioVec3{0.0, 1.0, 0.0};
     List_push(&m.buses, _Bus{parent: -1, gain: 1.0, target: 1.0});
     List_push(&m.buses, _Bus{parent: AUDIO_BUS_MASTER, gain: 1.0, target: 1.0});
     List_push(&m.buses, _Bus{parent: AUDIO_BUS_MASTER, gain: 1.0, target: 1.0});
@@ -128,7 +175,20 @@ Mixer mixer_new(int rate) {
 }
 
 void _voice_gains(_Voice* v) {
-    float pan = v.pan < -1.0 ? -1.0 : (v.pan > 1.0 ? 1.0 : v.pan);
+    if (v.space == _SPACE_FIELD) {
+        v.left = v.volume;
+        v.right = v.volume;
+        return;
+    }
+    float p = v.space == _SPACE_POINT ? v.space_pan : v.pan;
+    float vol = v.space == _SPACE_POINT ? v.volume * v.space_gain : v.volume;
+    float pan = p < -1.0 ? -1.0 : (p > 1.0 ? 1.0 : p);
+    if (v.space == _SPACE_POINT) {
+        double a = ((double)pan + 1.0) * 0.7853981633974483;
+        v.left = vol * (float)cos(a);
+        v.right = vol * (float)sin(a);
+        return;
+    }
     if (v.balance) {
         v.left = v.volume * (pan > 0.0 ? 1.0 - pan : 1.0);
         v.right = v.volume * (pan < 0.0 ? 1.0 + pan : 1.0);
@@ -548,6 +608,24 @@ bool _voice_sound_frame(*Mixer self, _Voice* v, *float l, *float r) {
     float r1 = _sample(s, i1, 1);
     *l = l0 + (l1 - l0) * (float)t;
     *r = r0 + (r1 - r0) * (float)t;
+    if (v.space == _SPACE_POINT) {
+        // a positioned sound is a point: its channels mixed to one
+        float c = (*l + *r) * 0.5;
+        *l = c;
+        *r = c;
+    } else if (v.space == _SPACE_FIELD && s.channels >= 4) {
+        // first-order AmbiX (W, Y, Z, X): a virtual cardioid toward each ear
+        float w0 = l0;
+        float w = w0 + (l1 - w0) * (float)t;
+        float y = r0 + (r1 - r0) * (float)t;
+        float z0 = _sample(s, i0, 2);
+        float z = z0 + (_sample(s, i1, 2) - z0) * (float)t;
+        float x0 = _sample(s, i0, 3);
+        float x = x0 + (_sample(s, i1, 3) - x0) * (float)t;
+        float side = v.kx * x + v.ky * y + v.kz * z;
+        *l = 0.5 * (w + side);
+        *r = 0.5 * (w - side);
+    }
     v.pos = v.pos + v.step;
     if (v.loop && v.pos >= (double)le) {
         double span = (double)(le - ls);
@@ -634,6 +712,136 @@ void Mixer_render(*Mixer self, *float out, int frames) {
     }
     _mixer_sweep(self);
     if (!self.manual_clock) _mixer_events(self);
+}
+
+// --- sound in space ---
+
+float _v3_dot(AudioVec3 a, AudioVec3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+AudioVec3 _v3_cross(AudioVec3 a, AudioVec3 b) {
+    return AudioVec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+AudioVec3 _v3_unit(AudioVec3 a) {
+    float l = (float)sqrt((double)_v3_dot(a, a));
+    if (l < 1e-9) return AudioVec3{0.0, 0.0, 0.0};
+    return AudioVec3{a.x / l, a.y / l, a.z / l};
+}
+
+AudioVec3 _quat_rotate(AudioQuat q, AudioVec3 v) {
+    AudioVec3 u = AudioVec3{q.x, q.y, q.z};
+    AudioVec3 t = _v3_cross(u, v);
+    t = AudioVec3{t.x * 2.0, t.y * 2.0, t.z * 2.0};
+    AudioVec3 c = _v3_cross(u, t);
+    return AudioVec3{v.x + q.w * t.x + c.x, v.y + q.w * t.y + c.y, v.z + q.w * t.z + c.z};
+}
+
+// The gain of a positioned sound at distance from the listener, for a rolloff model
+// (Resonance Audio's distance attenuation).
+float audio_rolloff_gain(int model, float distance, float min_distance, float max_distance) {
+    if (model == AUDIO_ROLLOFF_NONE) return 1.0;
+    if (distance > max_distance) return 0.0;
+    float near = min_distance > 1.0 ? min_distance : 1.0;
+    if (distance <= near) return 1.0;
+    float span = max_distance - near;
+    if (span <= 1e-6) return 1.0;
+    if (model == AUDIO_ROLLOFF_LINEAR) return (max_distance - distance) / span;
+    float g = 1.0 / (distance - near + 1.0);
+    float floor_g = 1.0 / (span + 1.0);
+    return (g - floor_g) / (1.0 - floor_g);
+}
+
+AudioVec3 _listener_right(*Mixer self) {
+    return _v3_unit(_v3_cross(self.listener_forward, self.listener_up));
+}
+
+void _voice_space(*Mixer self, _Voice* v) {
+    if (v.space == _SPACE_POINT) {
+        AudioVec3 d = AudioVec3{v.position.x - self.listener.x, v.position.y - self.listener.y, v.position.z - self.listener.z};
+        float dist = (float)sqrt((double)_v3_dot(d, d));
+        v.space_gain = audio_rolloff_gain(v.rolloff, dist, v.min_distance, v.max_distance);
+        v.space_pan = dist > 1e-6 ? _v3_dot(_v3_unit(d), _listener_right(self)) : 0.0;
+    } else if (v.space == _SPACE_FIELD) {
+        // the listener's left in the field's own axes, then in AmbiX's (x ahead, y left, z up)
+        AudioVec3 left = _listener_right(self);
+        left = AudioVec3{-left.x, -left.y, -left.z};
+        AudioQuat q = v.field_rotation;
+        AudioVec3 local = _quat_rotate(AudioQuat{-q.x, -q.y, -q.z, q.w}, left);
+        v.kx = -local.z;
+        v.ky = -local.x;
+        v.kz = local.y;
+    }
+    _voice_gains(v);
+}
+
+// Places the listener (the camera): its position, the direction it faces and its up.
+// Positioned sounds and sound fields follow it.
+void Mixer_set_listener(*Mixer self, AudioVec3 position, AudioVec3 forward, AudioVec3 up) {
+    self.listener = position;
+    self.listener_forward = _v3_unit(forward);
+    self.listener_up = _v3_unit(up);
+    for (i in 0..self.voices.size) _voice_space(self, &self.voices.data[i]);
+}
+
+// Places the listener from a rotation: ahead is -z and up is y turned by rotation.
+void Mixer_set_listener_pose(*Mixer self, AudioVec3 position, AudioQuat rotation) {
+    Mixer_set_listener(self, position, _quat_rotate(rotation, AudioVec3{0.0, 0.0, -1.0}), _quat_rotate(rotation, AudioVec3{0.0, 1.0, 0.0}));
+}
+
+// Starts sound at position (ViroReact's ViroSpatialSound): its channels mixed to one,
+// panned by where it is around the listener and faded by distance with the voice's rolloff
+// (none until Mixer_set_rolloff). opt.pan does not apply.
+uint32 Mixer_play_at(*Mixer self, *Sound sound, AudioPlay opt, AudioVec3 position) {
+    uint32 id = Mixer_play(self, sound, opt);
+    _Voice* v = _mixer_voice(self, id);
+    v.space = _SPACE_POINT;
+    v.position = position;
+    v.min_distance = 1.0;
+    v.max_distance = 10.0;
+    _voice_space(self, v);
+    return id;
+}
+
+// Moves a positioned sound.
+void Mixer_set_position(*Mixer self, uint32 id, AudioVec3 position) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null || v.space != _SPACE_POINT) return;
+    v.position = position;
+    _voice_space(self, v);
+}
+
+// Sets how a positioned sound fades with distance: an AUDIO_ROLLOFF_ model, the distance
+// where fading starts and the one where it reaches silence.
+void Mixer_set_rolloff(*Mixer self, uint32 id, int model, float min_distance, float max_distance) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null || v.space != _SPACE_POINT) return;
+    v.rolloff = model;
+    v.min_distance = min_distance;
+    v.max_distance = max_distance;
+    _voice_space(self, v);
+}
+
+// Starts a first-order ambisonic sound (ViroReact's ViroSoundField): four channels in AmbiX
+// order (W, Y, Z, X), turned by rotation, heard from the listener's orientation. A sound
+// with fewer channels plays as an ordinary one.
+uint32 Mixer_play_field(*Mixer self, *Sound sound, AudioPlay opt, AudioQuat rotation) {
+    uint32 id = Mixer_play(self, sound, opt);
+    if (sound.channels < 4) return id;
+    _Voice* v = _mixer_voice(self, id);
+    v.space = _SPACE_FIELD;
+    v.field_rotation = rotation;
+    _voice_space(self, v);
+    return id;
+}
+
+// Turns a sound field.
+void Mixer_set_field_rotation(*Mixer self, uint32 id, AudioQuat rotation) {
+    _Voice* v = _mixer_voice(self, id);
+    if (v == null || v.space != _SPACE_FIELD) return;
+    v.field_rotation = rotation;
+    _voice_space(self, v);
 }
 
 // Stops every voice and frees the mixer's lists; the sounds it played are the caller's.
